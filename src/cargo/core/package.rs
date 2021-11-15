@@ -301,8 +301,8 @@ impl hash::Hash for Package {
 /// This is primarily used to convert a set of `PackageId`s to `Package`s. It
 /// will download as needed, or used the cached download if available.
 pub struct PackageSet<'cfg> {
-    packages: HashMap<PackageId, LazyCell<Package>>,
-    sources: RefCell<SourceMap<'cfg>>,
+    pub packages: HashMap<PackageId, LazyCell<Package>>,
+    pub sources: RefCell<SourceMap<'cfg>>,
     config: &'cfg Config,
     multi: Multi,
     /// Used to prevent reusing the PackageSet to download twice.

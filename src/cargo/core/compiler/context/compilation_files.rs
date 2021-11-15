@@ -99,7 +99,7 @@ pub struct CompilationFiles<'a, 'cfg> {
     /// The target directory layout for the target (if different from then host).
     pub(super) target: HashMap<CompileTarget, Layout>,
     /// Additional directory to include a copy of the outputs.
-    export_dir: Option<PathBuf>,
+    export_dir: HashMap<Unit, PathBuf>,
     /// The root targets requested by the user on the command line (does not
     /// include dependencies).
     roots: Vec<Unit>,
@@ -153,7 +153,7 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
             ws: cx.bcx.ws,
             host,
             target,
-            export_dir: cx.bcx.build_config.export_dir.clone(),
+            export_dir: cx.bcx.unit_export_dirs.clone(),
             roots: cx.bcx.roots.clone(),
             metas,
             outputs,
@@ -208,10 +208,12 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
         }
     }
 
+    /*
     /// Additional export directory from `--out-dir`.
     pub fn export_dir(&self) -> Option<PathBuf> {
         self.export_dir.clone()
     }
+     */
 
     /// Directory name to use for a package in the form `NAME-HASH`.
     ///
@@ -404,21 +406,11 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
         }
 
         let filename = file_type.uplift_filename(&unit.target);
-        let uplift_path = if unit.target.is_example() {
-            // Examples live in their own little world.
-            self.layout(unit.kind).examples().join(filename)
-        } else if unit.target.is_custom_build() {
-            self.build_script_dir(unit).join(filename)
+        if unit.target.is_custom_build() {
+            Some(self.build_script_dir(unit).join(filename))
         } else {
-            self.layout(unit.kind).dest().join(filename)
-        };
-        if from_path == uplift_path {
-            // This can happen with things like examples that reside in the
-            // same directory, do not have a metadata hash (like on Windows),
-            // and do not have hyphens.
-            return None;
+            None
         }
-        Some(uplift_path)
     }
 
     fn calc_outputs(
@@ -515,15 +507,10 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
             // If, the `different_binary_name` feature is enabled, the name of the hardlink will
             // be the name of the binary provided by the user in `Cargo.toml`.
             let hardlink = self.uplift_to(unit, &file_type, &path);
-            let export_path = if unit.target.is_custom_build() {
-                None
-            } else {
-                self.export_dir.as_ref().and_then(|export_dir| {
-                    hardlink
-                        .as_ref()
-                        .map(|hardlink| export_dir.join(hardlink.file_name().unwrap()))
-                })
-            };
+            let export_path = self
+                .export_dir
+                .get(unit)
+                .map(|export_dir| export_dir.join(file_type.uplift_filename(&unit.target)));
             outputs.push(OutputFile {
                 path,
                 hardlink,
