@@ -99,7 +99,7 @@ pub struct CompilationFiles<'a, 'cfg> {
     /// The target directory layout for the target (if different from then host).
     pub(super) target: HashMap<CompileTarget, Layout>,
     /// Additional directory to include a copy of the outputs.
-    export_dir: Option<PathBuf>,
+    export_dir: HashMap<Unit, PathBuf>,
     /// The root targets requested by the user on the command line (does not
     /// include dependencies).
     roots: Vec<Unit>,
@@ -153,7 +153,7 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
             ws: cx.bcx.ws,
             host,
             target,
-            export_dir: cx.bcx.build_config.export_dir.clone(),
+            export_dir: cx.bcx.unit_export_dirs.clone(),
             roots: cx.bcx.roots.clone(),
             metas,
             outputs,
@@ -206,10 +206,12 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
         }
     }
 
+    /*
     /// Additional export directory from `--out-dir`.
     pub fn export_dir(&self) -> Option<PathBuf> {
         self.export_dir.clone()
     }
+     */
 
     /// Directory name to use for a package in the form `NAME-HASH`.
     ///
@@ -487,7 +489,7 @@ impl<'a, 'cfg: 'a> CompilationFiles<'a, 'cfg> {
             let export_path = if unit.target.is_custom_build() {
                 None
             } else {
-                self.export_dir.as_ref().and_then(|export_dir| {
+                self.export_dir.get(unit).and_then(|export_dir| {
                     hardlink
                         .as_ref()
                         .map(|hardlink| export_dir.join(hardlink.file_name().unwrap()))

@@ -445,7 +445,6 @@ fn rustc(cx: &mut Context<'_, '_>, unit: &Unit, exec: &Arc<dyn Executor>) -> Car
 fn link_targets(cx: &mut Context<'_, '_>, unit: &Unit, fresh: bool) -> CargoResult<Work> {
     let bcx = cx.bcx;
     let outputs = cx.outputs(unit)?;
-    let export_dir = cx.files().export_dir();
     let package_id = unit.pkg.package_id();
     let manifest_path = PathBuf::from(unit.pkg.manifest_path());
     let profile = unit.profile;
@@ -483,8 +482,7 @@ fn link_targets(cx: &mut Context<'_, '_>, unit: &Unit, fresh: bool) -> CargoResu
             destinations.push(dst.clone());
             paths::link_or_copy(src, dst)?;
             if let Some(ref path) = output.export_path {
-                let export_dir = export_dir.as_ref().unwrap();
-                paths::create_dir_all(export_dir)?;
+                paths::create_dir_all(path.parent().unwrap())?;
 
                 paths::link_or_copy(src, path)?;
             }

@@ -1,5 +1,5 @@
 [package]
-name = "cargo"
+name = "cargo-batch"
 version = "0.59.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -10,9 +10,9 @@ readme = "README.md"
 description = """
 Cargo, a package manager for Rust.
 """
+autobins = false
 
 [lib]
-name = "cargo"
 path = "src/cargo/lib.rs"
 
 [dependencies]
@@ -71,6 +71,7 @@ itertools = "0.10.0"
 # See the `src/tools/rustc-workspace-hack/README.md` file in `rust-lang/rust`
 # for more information.
 rustc-workspace-hack = "1.0.0"
+cfg-if = "1.0.0"
 
 [target.'cfg(windows)'.dependencies]
 fwdansi = "1.1.0"
@@ -105,7 +106,7 @@ flate2 = { version = "1.0.3", default-features = false, features = ["zlib"] }
 tar = { version = "0.4.26", default-features = false }
 
 [[bin]]
-name = "cargo"
+name = "cargo-batch"
 test = false
 doc = false
 
