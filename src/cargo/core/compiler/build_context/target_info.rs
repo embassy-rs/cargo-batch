@@ -703,8 +703,8 @@ pub struct RustcTargetData<'cfg> {
 
     /// Build information for targets that we're building for. This will be
     /// empty if the `--target` flag is not passed.
-    target_config: HashMap<CompileTarget, TargetConfig>,
-    target_info: HashMap<CompileTarget, TargetInfo>,
+    pub target_config: HashMap<CompileTarget, TargetConfig>,
+    pub target_info: HashMap<CompileTarget, TargetInfo>,
 }
 
 impl<'cfg> RustcTargetData<'cfg> {

@@ -55,6 +55,8 @@ pub struct BuildContext<'a, 'cfg> {
 
     /// The list of all kinds that are involved in this build
     pub all_kinds: HashSet<CompileKind>,
+
+    pub unit_export_dirs: HashMap<Unit, PathBuf>,
 }
 
 impl<'a, 'cfg> BuildContext<'a, 'cfg> {
@@ -90,6 +92,7 @@ impl<'a, 'cfg> BuildContext<'a, 'cfg> {
             unit_graph,
             scrape_units,
             all_kinds,
+            unit_export_dirs: HashMap::new(),
         })
     }
 

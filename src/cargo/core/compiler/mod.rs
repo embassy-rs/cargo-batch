@@ -445,7 +445,6 @@ fn rustc(cx: &mut Context<'_, '_>, unit: &Unit, exec: &Arc<dyn Executor>) -> Car
 fn link_targets(cx: &mut Context<'_, '_>, unit: &Unit, fresh: bool) -> CargoResult<Work> {
     let bcx = cx.bcx;
     let outputs = cx.outputs(unit)?;
-    let export_dir = cx.files().export_dir();
     let package_id = unit.pkg.package_id();
     let manifest_path = PathBuf::from(unit.pkg.manifest_path());
     let profile = unit.profile.clone();
@@ -473,20 +472,15 @@ fn link_targets(cx: &mut Context<'_, '_>, unit: &Unit, fresh: bool) -> CargoResu
             if !src.exists() {
                 continue;
             }
-            let dst = match output.hardlink.as_ref() {
-                Some(dst) => dst,
-                None => {
-                    destinations.push(src.clone());
-                    continue;
-                }
-            };
-            destinations.push(dst.clone());
-            paths::link_or_copy(src, dst)?;
-            if let Some(ref path) = output.export_path {
-                let export_dir = export_dir.as_ref().unwrap();
-                paths::create_dir_all(export_dir)?;
-
+            if let Some(path) = &output.hardlink {
+                paths::create_dir_all(path.parent().unwrap())?;
                 paths::link_or_copy(src, path)?;
+                destinations.push(path.clone());
+            }
+            if let Some(path) = &output.export_path {
+                paths::create_dir_all(path.parent().unwrap())?;
+                paths::link_or_copy(src, path)?;
+                destinations.push(path.clone());
             }
         }
 

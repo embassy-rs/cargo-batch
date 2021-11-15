@@ -592,10 +592,12 @@ pub fn create_bcx<'a, 'cfg>(
         remove_duplicate_doc(build_config, &units, &mut unit_graph);
     }
 
-    if build_config
-        .requested_kinds
-        .iter()
-        .any(CompileKind::is_host)
+    // cargo-many: we have to do this always, as we can have dupe units even if
+    // we're not building for the host.
+    // if build_config
+    //     .requested_kinds
+    //     .iter()
+    //     .any(CompileKind::is_host)
     {
         // Rebuild the unit graph, replacing the explicit host targets with
         // CompileKind::Host, merging any dependencies shared with build
