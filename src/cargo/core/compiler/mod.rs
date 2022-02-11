@@ -247,6 +247,8 @@ fn rustc(cx: &mut Context<'_, '_>, unit: &Unit, exec: &Arc<dyn Executor>) -> Car
     let mut output_options = OutputOptions::new(cx, unit);
     let package_id = unit.pkg.package_id();
     let target = Target::clone(&unit.target);
+    let features = unit.features.clone();
+    let kind = unit.kind;
     let mode = unit.mode;
 
     exec.init(cx, unit);
@@ -355,7 +357,7 @@ fn rustc(cx: &mut Context<'_, '_>, unit: &Unit, exec: &Arc<dyn Executor>) -> Car
                     1 => " due to previous error".to_string(),
                     count => format!(" due to {} previous errors", count),
                 };
-                format!("could not compile `{}`{}{}", name, errors, warnings)
+                format!("could not compile `{}`{}{}\n     target: {:?}\n     features: {:?}", name, errors, warnings, kind, features)
             })?;
             // Exec should never return with success *and* generate an error.
             debug_assert_eq!(output_options.errors_seen, 0);
