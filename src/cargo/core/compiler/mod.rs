@@ -291,6 +291,8 @@ fn rustc(
     let mut output_options = OutputOptions::new(build_runner, unit);
     let package_id = unit.pkg.package_id();
     let target = Target::clone(&unit.target);
+    let features = unit.features.clone();
+    let kind = unit.kind;
     let mode = unit.mode;
 
     exec.init(build_runner, unit);
@@ -434,7 +436,7 @@ fn rustc(
                         count => format!(" due to {} previous errors", count),
                     };
                     let name = descriptive_pkg_name(&name, &target, &mode);
-                    format!("could not compile {name}{errors}{warnings}")
+                    format!("could not compile {name}{errors}{warnings}\n     target: {kind:?}\n     features: {features:?}")
                 });
 
             if let Err(e) = result {
@@ -540,7 +542,6 @@ fn link_targets(
 ) -> CargoResult<Work> {
     let bcx = build_runner.bcx;
     let outputs = build_runner.outputs(unit)?;
-    let export_dir = build_runner.files().export_dir();
     let package_id = unit.pkg.package_id();
     let manifest_path = PathBuf::from(unit.pkg.manifest_path());
     let profile = unit.profile.clone();
@@ -571,17 +572,15 @@ fn link_targets(
             if !src.exists() {
                 continue;
             }
-            let Some(dst) = output.hardlink.as_ref() else {
-                destinations.push(src.clone());
-                continue;
-            };
-            destinations.push(dst.clone());
-            paths::link_or_copy(src, dst)?;
-            if let Some(ref path) = output.export_path {
-                let export_dir = export_dir.as_ref().unwrap();
-                paths::create_dir_all(export_dir)?;
-
+            if let Some(path) = &output.hardlink {
+                paths::create_dir_all(path.parent().unwrap())?;
                 paths::link_or_copy(src, path)?;
+                destinations.push(path.clone());
+            }
+            if let Some(path) = &output.export_path {
+                paths::create_dir_all(path.parent().unwrap())?;
+                paths::link_or_copy(src, path)?;
+                destinations.push(path.clone());
             }
         }
 
