@@ -873,9 +873,9 @@ pub struct RustcTargetData<'gctx> {
     host_info: TargetInfo,
 
     /// Build information for targets that we're building for.
-    target_config: HashMap<CompileTarget, TargetConfig>,
+    pub target_config: HashMap<CompileTarget, TargetConfig>,
     /// Information about the target platform that we're building for.
-    target_info: HashMap<CompileTarget, TargetInfo>,
+    pub target_info: HashMap<CompileTarget, TargetInfo>,
 }
 
 impl<'gctx> RustcTargetData<'gctx> {
