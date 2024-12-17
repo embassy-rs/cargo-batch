@@ -581,12 +581,18 @@ fn compute_metadata(
 
     METADATA_VERSION.hash(&mut hasher);
 
-    // Unique metadata per (name, source, version) triple. This'll allow us
-    // to pull crates from anywhere without worrying about conflicts.
-    unit.pkg
-        .package_id()
-        .stable_hash(bcx.ws.root())
-        .hash(&mut hasher);
+    if unit.is_std {
+        // SourceId for build-std crates is a full absolute path inside the sysroot.
+        // Don't hash it to avoid the metadata hash changing depending on where the user installed rustc.
+        unit.pkg.name().hash(&mut hasher);
+    } else {
+        // Unique metadata per (name, source, version) triple. This'll allow us
+        // to pull crates from anywhere without worrying about conflicts.
+        unit.pkg
+            .package_id()
+            .stable_hash(bcx.ws.root())
+            .hash(&mut hasher);
+    }
 
     // Also mix in enabled features to our metadata. This'll ensure that
     // when changing feature sets each lib is separately cached.
