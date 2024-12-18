@@ -119,8 +119,12 @@ pub struct CompilationFiles<'a, 'gctx> {
     pub(super) host: Layout,
     /// The target directory layout for the target (if different from then host).
     pub(super) target: HashMap<CompileTarget, Layout>,
+    /// do uplift in target/. true for regular cargo, false for cargo-batch.
+    do_uplift: bool,
     /// Additional directory to include a copy of the outputs.
     export_dir: Option<PathBuf>,
+    /// Per-unit export dirs
+    unit_export_dirs: HashMap<Unit, PathBuf>,
     /// The root targets requested by the user on the command line (does not
     /// include dependencies).
     roots: Vec<Unit>,
@@ -175,6 +179,8 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
             host,
             target,
             export_dir: build_runner.bcx.build_config.export_dir.clone(),
+            unit_export_dirs: build_runner.bcx.unit_export_dirs.clone(),
+            do_uplift: build_runner.bcx.do_uplift,
             roots: build_runner.bcx.roots.clone(),
             metas,
             outputs,
@@ -545,16 +551,22 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
 
             // If, the `different_binary_name` feature is enabled, the name of the hardlink will
             // be the name of the binary provided by the user in `Cargo.toml`.
-            let hardlink = self.uplift_to(unit, &file_type, &path);
+            let mut hardlink = self.uplift_to(unit, &file_type, &path);
             let export_path = if unit.target.is_custom_build() {
                 None
             } else {
-                self.export_dir.as_ref().and_then(|export_dir| {
-                    hardlink
-                        .as_ref()
-                        .map(|hardlink| export_dir.join(hardlink.file_name().unwrap()))
-                })
+                self.unit_export_dirs
+                    .get(unit)
+                    .or(self.export_dir.as_ref())
+                    .and_then(|export_dir| {
+                        hardlink
+                            .as_ref()
+                            .map(|hardlink| export_dir.join(hardlink.file_name().unwrap()))
+                    })
             };
+            if !self.do_uplift {
+                hardlink = None
+            }
             outputs.push(OutputFile {
                 path,
                 hardlink,
