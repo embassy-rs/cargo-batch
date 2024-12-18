@@ -266,6 +266,11 @@ name = "cargo"
 test = false
 doc = false
 
+[[bin]]
+name = "cargo-batch"
+test = false
+doc = false
+
 [features]
 vendored-openssl = ["openssl/vendored"]
 vendored-libgit2 = ["libgit2-sys/vendored"]
