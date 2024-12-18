@@ -285,8 +285,8 @@ impl hash::Hash for Package {
 /// This is primarily used to convert a set of `PackageId`s to `Package`s. It
 /// will download as needed, or used the cached download if available.
 pub struct PackageSet<'gctx> {
-    packages: HashMap<PackageId, OnceCell<Package>>,
-    sources: RefCell<SourceMap<'gctx>>,
+    pub packages: HashMap<PackageId, OnceCell<Package>>,
+    pub sources: RefCell<SourceMap<'gctx>>,
     gctx: &'gctx GlobalContext,
 }
 

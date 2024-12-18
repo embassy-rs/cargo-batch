@@ -15,6 +15,7 @@ use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
 use crate::util::logger::BuildLogger;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 mod target_info;
 pub use self::target_info::FileFlavor;
@@ -93,6 +94,9 @@ pub struct BuildContext<'a, 'gctx> {
 
     /// The list of all kinds that are involved in this build
     pub all_kinds: HashSet<CompileKind>,
+
+    pub do_uplift: bool,
+    pub unit_export_dirs: HashMap<Unit, PathBuf>,
 }
 
 impl<'a, 'gctx> BuildContext<'a, 'gctx> {
@@ -132,6 +136,8 @@ impl<'a, 'gctx> BuildContext<'a, 'gctx> {
             unit_to_index,
             scrape_units,
             all_kinds,
+            do_uplift: true,
+            unit_export_dirs: HashMap::new(),
         })
     }
 

@@ -289,6 +289,11 @@ name = "cargo"
 test = false
 doc = false
 
+[[bin]]
+name = "cargo-batch"
+test = false
+doc = false
+
 [features]
 default = ["http-transport-curl"]
 vendored-openssl = ["openssl/vendored"]
