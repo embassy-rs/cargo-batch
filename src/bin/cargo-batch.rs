@@ -111,7 +111,7 @@ fn main2(config: &mut GlobalContext) -> CliResult {
             Some(&ws),
             ProfileChecking::Custom,
         )?;
-        if let Some(out_dir) = args.value_of_path("out-dir", config) {
+        if let Some(out_dir) = args.value_of_path("artifact-dir", config) {
             compile_opts.build_config.export_dir = Some(out_dir);
         } else if let Some(out_dir) = config.build_config()?.out_dir.as_ref() {
             let out_dir = out_dir.resolve_path(config);
@@ -120,7 +120,7 @@ fn main2(config: &mut GlobalContext) -> CliResult {
         //if compile_opts.build_config.export_dir.is_some() {
         //    config
         //        .cli_unstable()
-        //        .fail_if_stable_opt("--out-dir", 6790)?;
+        //        .fail_if_stable_opt("--artifact-dir", 6790)?;
         //}
 
         //println!("compile opts: {:#?}", compile_opts);
@@ -246,7 +246,7 @@ pub fn build_cli() -> Command {
         .arg_target_triple("Build for the target triple")
         .arg(
             opt(
-                "out-dir",
+                "artifact-dir",
                 "Copy final artifacts to this directory (unstable)",
             )
             .value_name("PATH")

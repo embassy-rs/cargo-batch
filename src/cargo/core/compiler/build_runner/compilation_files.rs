@@ -564,7 +564,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
                             .map(|hardlink| export_dir.join(hardlink.file_name().unwrap()))
                     })
             };
-            if !self.do_uplift {
+            if !self.do_uplift && !unit.target.is_custom_build() {
                 hardlink = None
             }
             outputs.push(OutputFile {
