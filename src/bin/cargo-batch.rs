@@ -8,7 +8,7 @@ use cargo::core::compiler::{
 };
 use cargo::core::shell::Shell;
 use cargo::core::Workspace;
-use cargo::ops::CompileOptions;
+use cargo::ops::{CompileOptions, OutputFormat};
 use cargo::util::network::http::{http_handle, needs_custom_http_transport};
 use cargo::util::{command_prelude, CliResult, GlobalContext};
 use std::env;
@@ -35,7 +35,7 @@ fn main() {
     }
 }
 
-fn main2(config: &mut GlobalContext) -> CliResult {
+fn main2(gctx: &mut GlobalContext) -> CliResult {
     let args: Vec<_> = env::args().collect();
     let mut subargs = args.split(|x| *x == "---");
 
@@ -87,8 +87,8 @@ fn main2(config: &mut GlobalContext) -> CliResult {
         )
         .try_get_matches_from(global_args)?;
 
-    config_configure(config, &global_args)?;
-    init_git_transports(config);
+    config_configure(gctx, &global_args)?;
+    init_git_transports(gctx);
 
     let unit_graph = global_args.flag("unit-graph");
 
@@ -100,31 +100,62 @@ fn main2(config: &mut GlobalContext) -> CliResult {
     let mut cmds = Vec::new();
     for args in subargs {
         let cli = build_cli();
-        let args = cli.try_get_matches_from(args)?;
-        //println!("args opts: {:#?}", args);
+        let args =
+            cli.try_get_matches_from([&String::new()].into_iter().chain(args.into_iter()))?;
+        let (subcmd, args) = args.subcommand().unwrap();
+        match subcmd {
+            "build" => {
+                let ws = args.workspace(gctx)?;
 
-        let ws = args.workspace(config)?;
+                let mut compile_opts = args.compile_options(
+                    gctx,
+                    CompileMode::Build,
+                    Some(&ws),
+                    ProfileChecking::Custom,
+                )?;
+                if let Some(out_dir) = args.value_of_path("artifact-dir", gctx) {
+                    compile_opts.build_config.export_dir = Some(out_dir);
+                }
 
-        let mut compile_opts = args.compile_options(
-            config,
-            CompileMode::Build,
-            Some(&ws),
-            ProfileChecking::Custom,
-        )?;
-        if let Some(out_dir) = args.value_of_path("artifact-dir", config) {
-            compile_opts.build_config.export_dir = Some(out_dir);
-        } else if let Some(out_dir) = config.build_config()?.out_dir.as_ref() {
-            let out_dir = out_dir.resolve_path(config);
-            compile_opts.build_config.export_dir = Some(out_dir);
+                //println!("compile opts: {:#?}", compile_opts);
+                cmds.push(CommandState { ws, compile_opts });
+            }
+            "rustdoc" => {
+                let ws = args.workspace(gctx)?;
+                let output_format = if let Some(output_format) = args._value_of("output-format") {
+                    gctx.cli_unstable()
+                        .fail_if_stable_opt("--output-format", 12103)?;
+                    output_format.parse()?
+                } else {
+                    OutputFormat::Html
+                };
+
+                //panic!("output-format {output_format:?}");
+
+                let mut compile_opts = args.compile_options(
+                    gctx,
+                    CompileMode::Doc {
+                        deps: false,
+                        json: matches!(output_format, OutputFormat::Json),
+                    },
+                    Some(&ws),
+                    ProfileChecking::Custom,
+                )?;
+                if let Some(out_dir) = args.value_of_path("artifact-dir", gctx) {
+                    compile_opts.build_config.export_dir = Some(out_dir);
+                }
+                let target_args = values(args, "args");
+                compile_opts.target_rustdoc_args = if target_args.is_empty() {
+                    None
+                } else {
+                    Some(target_args)
+                };
+
+                //println!("compile opts: {:#?}", compile_opts);
+                cmds.push(CommandState { ws, compile_opts });
+            }
+            _ => unreachable!(),
         }
-        //if compile_opts.build_config.export_dir.is_some() {
-        //    config
-        //        .cli_unstable()
-        //        .fail_if_stable_opt("--artifact-dir", 6790)?;
-        //}
-
-        //println!("compile opts: {:#?}", compile_opts);
-        cmds.push(CommandState { ws, compile_opts });
     }
 
     let interner = UnitInterner::new();
@@ -216,47 +247,81 @@ fn config_configure(config: &mut GlobalContext, args: &ArgMatches) -> CliResult 
 }
 
 pub fn build_cli() -> Command {
-    subcommand("build")
-        .about("Compile a local package and all of its dependencies")
-        .arg_ignore_rust_version()
-        .arg_future_incompat_report()
-        .arg_message_format()
-        .arg_silent_suggestion()
-        .arg_package_spec(
-            "Package to build (see `cargo help pkgid`)",
-            "Build all packages in the workspace",
-            "Exclude packages from the build",
+    subcommand("cargo-batch")
+        .subcommand(
+            subcommand("build")
+                .about("Compile a local package and all of its dependencies")
+                .arg_future_incompat_report()
+                .arg_package_spec(
+                    "Package to build (see `cargo help pkgid`)",
+                    "Build all packages in the workspace",
+                    "Exclude packages from the build",
+                )
+                .arg_targets_all(
+                    "Build only this package's library",
+                    "Build only the specified binary",
+                    "Build all binaries",
+                    "Build only the specified example",
+                    "Build all examples",
+                    "Build only the specified test target",
+                    "Build all targets that have `test = true` set",
+                    "Build only the specified bench target",
+                    "Build all targets that have `bench = true` set",
+                    "Build all targets",
+                )
+                .arg_features()
+                .arg_release("Build artifacts in release mode, with optimizations")
+                .arg_redundant_default_mode("debug", "build", "release")
+                .arg_profile("Build artifacts with the specified profile")
+                .arg_target_triple("Build for the target triple")
+                .arg_artifact_dir()
+                .arg_manifest_path()
+                .arg_lockfile_path()
+                .arg_ignore_rust_version()
+                .after_help(color_print::cstr!(
+                    "Run `<cyan,bold>cargo help build</>` for more detailed information.\n"
+                )),
         )
-        .arg_targets_all(
-            "Build only this package's library",
-            "Build only the specified binary",
-            "Build all binaries",
-            "Build only the specified example",
-            "Build all examples",
-            "Build only the specified test target",
-            "Build all tests",
-            "Build only the specified bench target",
-            "Build all benches",
-            "Build all targets",
+        .subcommand(
+            subcommand("rustdoc")
+                .about("Build a package's documentation, using specified custom flags.")
+                .arg(
+                    Arg::new("args")
+                        .value_name("ARGS")
+                        .help("Extra rustdoc flags")
+                        .num_args(0..)
+                        .trailing_var_arg(true),
+                )
+                .arg_package("Package to document")
+                .arg_targets_all(
+                    "Build only this package's library",
+                    "Build only the specified binary",
+                    "Build all binaries",
+                    "Build only the specified example",
+                    "Build all examples",
+                    "Build only the specified test target",
+                    "Build all targets that have `test = true` set",
+                    "Build only the specified bench target",
+                    "Build all targets that have `bench = true` set",
+                    "Build all targets",
+                )
+                .arg_features()
+                .arg_release("Build artifacts in release mode, with optimizations")
+                .arg_profile("Build artifacts with the specified profile")
+                .arg_target_triple("Build for the target triple")
+                .arg(
+                    opt("output-format", "The output type to write (unstable)")
+                        .value_name("FMT")
+                        .value_parser(OutputFormat::POSSIBLE_VALUES),
+                )
+                .arg_artifact_dir()
+                .arg_manifest_path()
+                .arg_lockfile_path()
+                .arg_ignore_rust_version()
+                .after_help(color_print::cstr!(
+                    "Run `<cyan,bold>cargo help rustdoc</>` for more detailed information.\n"
+                )),
         )
-        .arg_features()
-        .arg_release("Build artifacts in release mode, with optimizations")
-        .arg_profile("Build artifacts with the specified profile")
-        .arg_parallel()
-        .arg_target_triple("Build for the target triple")
-        .arg(
-            opt(
-                "artifact-dir",
-                "Copy final artifacts to this directory (unstable)",
-            )
-            .value_name("PATH")
-            .help_heading(heading::COMPILATION_OPTIONS),
-        )
-        .arg_build_plan()
-        .arg_unit_graph()
-        .arg_timings()
-        .arg_manifest_path()
-        .after_help("Run `cargo help build` for more detailed information.\n")
 }
 
 fn setup_logger() {

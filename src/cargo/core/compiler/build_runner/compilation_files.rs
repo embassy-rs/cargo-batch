@@ -217,6 +217,9 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         // Docscrape units need to have doc/ set as the out_dir so sources for reverse-dependencies
         // will be put into doc/ and not into deps/ where the *.examples files are stored.
         if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
+            if let Some(dir) = self.unit_export_dirs.get(unit) {
+                return dir.clone();
+            }
             self.layout(unit.kind).doc().to_path_buf()
         } else if unit.mode.is_doc_test() {
             panic!("doc tests do not have an out dir");

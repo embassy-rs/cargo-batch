@@ -584,7 +584,7 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
         let mut doc_libs = HashMap::new();
         let mut doc_bins = HashMap::new();
         for unit in keys {
-            if unit.mode.is_doc() && self.is_primary_package(unit) {
+            if false && unit.mode.is_doc() && self.is_primary_package(unit) {
                 // These situations have been an error since before 1.0, so it
                 // is not a warning like the other situations.
                 if unit.target.is_lib() {
