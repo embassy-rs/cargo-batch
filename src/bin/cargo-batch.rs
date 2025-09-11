@@ -192,6 +192,9 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                 .sources
                 .borrow_mut()
                 .add_source_map(bcx.packages.sources.into_inner());
+            merged_bcx
+                .extra_compiler_args
+                .extend(bcx.extra_compiler_args);
         } else {
             merged_bcx = Some(bcx)
         }
