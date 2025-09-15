@@ -9,8 +9,32 @@
 //! some nodes may only require one of the outputs and can start before the
 //! whole node is finished.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::Hash;
+
+#[derive(Debug)]
+struct Ready<N: Eq, V> {
+    key: N,
+    data: V,
+    priority: usize,
+}
+
+impl<N: Eq, V> PartialEq for Ready<N, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key.eq(&other.key)
+    }
+}
+impl<N: Eq, V> Eq for Ready<N, V> {}
+impl<N: Eq, V> PartialOrd for Ready<N, V> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.priority.partial_cmp(&other.priority)
+    }
+}
+impl<N: Eq, V> Ord for Ready<N, V> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority.cmp(&other.priority)
+    }
+}
 
 #[derive(Debug)]
 pub struct DependencyQueue<N: Hash + Eq, E: Hash + Eq, V> {
@@ -20,6 +44,8 @@ pub struct DependencyQueue<N: Hash + Eq, E: Hash + Eq, V> {
     /// built before the package can be built. Note that the set is dynamically
     /// updated as more dependencies are built.
     dep_map: HashMap<N, (HashSet<(N, E)>, V)>,
+
+    ready: BinaryHeap<Ready<N, V>>,
 
     /// A reverse mapping of a package to all packages that depend on that
     /// package.
@@ -49,6 +75,7 @@ impl<N: Hash + Eq, E: Hash + Eq, V> DependencyQueue<N, E, V> {
     pub fn new() -> DependencyQueue<N, E, V> {
         DependencyQueue {
             dep_map: HashMap::new(),
+            ready: BinaryHeap::new(),
             reverse_dep_map: HashMap::new(),
             priority: HashMap::new(),
             cost: HashMap::new(),
@@ -143,6 +170,15 @@ impl<N: Hash + Eq + Clone, E: Eq + Hash + Clone, V> DependencyQueue<N, E, V> {
             *slot = set;
             &*slot
         }
+
+        for (key, (_, data)) in self.dep_map.extract_if(|_, (deps, _)| deps.is_empty()) {
+            let priority = *self.priority.get(&key).unwrap();
+            self.ready.push(Ready {
+                key,
+                data,
+                priority,
+            });
+        }
     }
 
     /// Dequeues a package that is ready to be built.
@@ -150,14 +186,7 @@ impl<N: Hash + Eq + Clone, E: Eq + Hash + Clone, V> DependencyQueue<N, E, V> {
     /// A package is ready to be built when it has 0 un-built dependencies. If
     /// `None` is returned then no packages are ready to be built.
     pub fn dequeue(&mut self) -> Option<(N, V, usize)> {
-        let (key, priority) = self
-            .dep_map
-            .iter()
-            .filter(|(_, (deps, _))| deps.is_empty())
-            .map(|(key, _)| (key.clone(), self.priority[key]))
-            .max_by_key(|(_, priority)| *priority)?;
-        let (_, data) = self.dep_map.remove(&key).unwrap();
-        Some((key, data, priority))
+        self.ready.pop().map(|r| (r.key, r.data, r.priority))
     }
 
     /// Returns `true` if there are remaining packages to be built.
@@ -190,6 +219,14 @@ impl<N: Hash + Eq + Clone, E: Eq + Hash + Clone, V> DependencyQueue<N, E, V> {
             let edges = &mut self.dep_map.get_mut(dep).unwrap().0;
             assert!(edges.remove(&key));
             if edges.is_empty() {
+                let (_, data) = self.dep_map.remove(dep).unwrap();
+                let priority = *self.priority.get(dep).unwrap();
+                self.ready.push(Ready {
+                    key: dep.clone(),
+                    data,
+                    priority,
+                });
+
                 result.push(dep);
             }
         }
