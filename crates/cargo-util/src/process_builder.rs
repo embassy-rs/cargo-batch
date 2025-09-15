@@ -515,9 +515,9 @@ impl ProcessBuilder {
                 }
             }
         }
-        if let Some(ref c) = self.jobserver {
-            c.configure(&mut command);
-        }
+        //if let Some(ref c) = self.jobserver {
+        //    c.configure(&mut command);
+        //}
         command
     }
 
