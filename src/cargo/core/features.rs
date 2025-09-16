@@ -122,6 +122,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fmt::{self, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::str::FromStr;
 
 use anyhow::{bail, Error};
@@ -1417,9 +1418,47 @@ pub fn channel() -> String {
             return "dev".to_string();
         }
     }
-    crate::version()
-        .release_channel
-        .unwrap_or_else(|| String::from("dev"))
+
+    cargo_channel()
+}
+
+fn cargo_channel() -> String {
+    // Try to work with the cargo process that invoked us.
+    let cargo_process = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let version_output = Command::new(cargo_process)
+        .arg("--version")
+        .output()
+        .expect("failed to execute cargo")
+        .stdout;
+
+    let version_str = str::from_utf8(&version_output)
+        .expect("failed to convert cargo version to string")
+        .trim();
+
+    // cargo version (build info) -> version
+    let mut split = version_str.split(' ');
+    let _cargo = split.next().unwrap_or_default();
+    let version_str = split.next().unwrap_or_default();
+    // ignore the rest
+
+    // version-nightly/version-beta.n -> nightly/beta.n
+    let channel_str = version_str
+        .rsplit_once("-")
+        .map(|(_, channel)| channel)
+        .unwrap_or("");
+
+    // beta.n -> beta
+    let channel_str = channel_str
+        .rsplit_once(".")
+        .map(|(channel, _)| channel)
+        .unwrap_or(channel_str);
+
+    match channel_str {
+        "nightly" => "nightly".to_string(),
+        "beta" => "beta".to_string(),
+        _ => "stable".to_string(),
+    }
 }
 
 /// Only for testing and developing. See ["Running with gitoxide as default git backend in tests"][1].
