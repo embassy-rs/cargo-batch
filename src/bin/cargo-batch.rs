@@ -120,6 +120,19 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                 //println!("compile opts: {:#?}", compile_opts);
                 cmds.push(CommandState { ws, compile_opts });
             }
+            "check" => {
+                let ws = args.workspace(gctx)?;
+                // This is a legacy behavior that causes `cargo check` to pass `--test`.
+                let test = matches!(
+                    args.get_one::<String>("profile").map(String::as_str),
+                    Some("test")
+                );
+                let mode = CompileMode::Check { test };
+                let compile_opts =
+                    args.compile_options(gctx, mode, Some(&ws), ProfileChecking::LegacyTestOnly)?;
+
+                cmds.push(CommandState { ws, compile_opts });
+            }
             "rustdoc" => {
                 let ws = args.workspace(gctx)?;
                 let output_format = if let Some(output_format) = args._value_of("output-format") {
