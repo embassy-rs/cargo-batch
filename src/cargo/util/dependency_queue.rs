@@ -196,7 +196,7 @@ impl<N: Hash + Eq + Clone, E: Eq + Hash + Clone, V> DependencyQueue<N, E, V> {
 
     /// Returns the number of remaining packages to be built.
     pub fn len(&self) -> usize {
-        self.dep_map.len()
+        self.dep_map.len() + self.ready.len()
     }
 
     /// Indicate that something has finished.
