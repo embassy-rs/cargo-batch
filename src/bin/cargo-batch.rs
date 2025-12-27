@@ -11,8 +11,8 @@ use cargo::core::Workspace;
 use cargo::ops::{CompileOptions, OutputFormat};
 use cargo::util::network::http::{http_handle, needs_custom_http_transport};
 use cargo::util::{command_prelude, CliResult, GlobalContext};
-use std::env;
 use std::sync::Arc;
+use std::{env, io};
 
 use crate::command_prelude::*;
 
@@ -56,6 +56,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
             .global(true),
         )
         .arg_silent_suggestion()
+        .arg(flag("stdin", "Collect arguments from stdin").global(true))
         .arg(
             opt("color", "Coloring: auto, always, never")
                 .value_name("WHEN")
@@ -97,11 +98,27 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
         compile_opts: CompileOptions,
     }
 
+    let subargs: Vec<Vec<String>> = if global_args.get_flag("stdin") {
+        io::stdin()
+            .lines()
+            .filter_map(|x| x.ok())
+            .take_while(|x| x != "EOF")
+            .map(|l| {
+                l.split_whitespace()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        subargs
+            .map(|x| x.iter().map(|x| x.clone()).collect::<Vec<_>>())
+            .collect()
+    };
+
     let mut cmds = Vec::new();
     for args in subargs {
         let cli = build_cli();
-        let args =
-            cli.try_get_matches_from([&String::new()].into_iter().chain(args.into_iter()))?;
+        let args = cli.try_get_matches_from([String::new()].into_iter().chain(args.into_iter()))?;
         let (subcmd, args) = args.subcommand().unwrap();
         match subcmd {
             "build" => {
