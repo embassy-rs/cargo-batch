@@ -96,6 +96,7 @@ serde_json = "1.0.138"
 sha1 = "0.10.6"
 sha2 = "0.10.8"
 shell-escape = "0.1.5"
+shell-words = "1.1.1"
 similar = "2.7.0"
 supports-hyperlinks = "3.1.0"
 supports-unicode = "3.0.0"
@@ -204,6 +205,7 @@ serde_ignored.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha1.workspace = true
 shell-escape.workspace = true
+shell-words.workspace = true
 supports-hyperlinks.workspace = true
 supports-unicode.workspace = true
 tar.workspace = true
