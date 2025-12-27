@@ -102,7 +102,6 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
         io::stdin()
             .lines()
             .filter_map(|x| x.ok())
-            .take_while(|x| x != "EOF")
             .map(|l| shell_words::split(&l).unwrap())
             .collect()
     } else {
