@@ -434,6 +434,7 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "shell-escape",
+ "shell-words",
  "snapbox",
  "tar",
  "tempfile",
