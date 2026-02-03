@@ -155,6 +155,20 @@ impl<'gctx> GitSource<'gctx> {
             });
         Ok(())
     }
+
+    /// Whether the registry is up-to-date. See [`Self::mark_updated`] for more.
+    fn is_updated(&self) -> bool {
+        self.gctx.updated_sources().contains(&self.source_id)
+    }
+
+    /// Marks this registry as up-to-date.
+    ///
+    /// This makes sure the index is only updated once per session since it is
+    /// an expensive operation. This generally only happens when the resolver
+    /// is run multiple times, such as during `cargo publish`.
+    fn mark_updated(&self) {
+        self.gctx.updated_sources().insert(self.source_id);
+    }
 }
 
 /// Indicates a [Git revision] that might be locked or deferred to be resolved.
@@ -296,6 +310,14 @@ impl<'gctx> Source for GitSource<'gctx> {
             // which has that revision, then no update needs to happen.
             (Revision::Locked(oid), Some(db)) if db.contains(*oid) => (db, *oid),
 
+            // If we've already checked out this source, try resolving the reference.
+            (Revision::Deferred(git_ref), Some(db)) if self.is_updated() => {
+                let rev = db.resolve(&git_ref).with_context(|| {
+                    format!("failed to lookup reference in preexisting repository")
+                })?;
+                (db, rev)
+            }
+
             // If we're in offline mode, we're not locked, and we have a
             // database, then try to resolve our reference with the preexisting
             // repository.
@@ -318,6 +340,7 @@ impl<'gctx> Source for GitSource<'gctx> {
             // situation that we have a locked revision but the database
             // doesn't have it.
             (locked_rev, db) => {
+                self.mark_updated();
                 if let Some(offline_flag) = self.gctx.offline_flag() {
                     anyhow::bail!(
                         "can't checkout from '{}': you are in the offline mode ({offline_flag})",
