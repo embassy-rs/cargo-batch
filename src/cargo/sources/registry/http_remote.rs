@@ -252,6 +252,20 @@ impl<'gctx> HttpRegistry<'gctx> {
         Some((tag, value))
     }
 
+    /// Whether the registry is up-to-date. See [`Self::mark_updated`] for more.
+    fn is_updated(&self) -> bool {
+        self.gctx.updated_sources().contains(&self.source_id)
+    }
+
+    /// Marks this registry as up-to-date.
+    ///
+    /// This makes sure the index is only updated once per session since it is
+    /// an expensive operation. This generally only happens when the resolver
+    /// is run multiple times, such as during `cargo publish`.
+    fn mark_updated(&self) {
+        self.gctx.updated_sources().insert(self.source_id);
+    }
+
     /// Setup the necessary works before the first fetch gets started.
     ///
     /// This is a no-op if called more than one time.
@@ -261,6 +275,11 @@ impl<'gctx> HttpRegistry<'gctx> {
             return Ok(());
         }
         self.fetch_started = true;
+
+        if self.is_updated() {
+            return Ok(());
+        }
+        self.mark_updated();
 
         // We've enabled the `http2` feature of `curl` in Cargo, so treat
         // failures here as fatal as it would indicate a build-time problem.
