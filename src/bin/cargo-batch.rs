@@ -6,8 +6,8 @@
 use cargo::core::compiler::{
     unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, UnitInterner,
 };
-use cargo::core::shell::Shell;
 use cargo::core::Workspace;
+use cargo_util_terminal::Shell;
 use cargo::ops::{CompileOptions, OutputFormat};
 use cargo::util::network::http::{http_handle, needs_custom_http_transport};
 use cargo::util::{command_prelude, CliResult, GlobalContext};
@@ -121,7 +121,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
 
                 let mut compile_opts = args.compile_options(
                     gctx,
-                    CompileMode::Build,
+                    UserIntent::Build,
                     Some(&ws),
                     ProfileChecking::Custom,
                 )?;
@@ -139,7 +139,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                     args.get_one::<String>("profile").map(String::as_str),
                     Some("test")
                 );
-                let mode = CompileMode::Check { test };
+                let mode = UserIntent::Check { test };
                 let compile_opts =
                     args.compile_options(gctx, mode, Some(&ws), ProfileChecking::LegacyTestOnly)?;
 
@@ -159,7 +159,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
 
                 let mut compile_opts = args.compile_options(
                     gctx,
-                    CompileMode::Doc {
+                    UserIntent::Doc {
                         deps: false,
                         json: matches!(output_format, OutputFormat::Json),
                     },
@@ -189,7 +189,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
     for cmd in &mut cmds {
         let export_dir = cmd.compile_opts.build_config.export_dir.take();
 
-        let mut bcx = cargo::ops::create_bcx(&cmd.ws, &cmd.compile_opts, &interner).unwrap();
+        let mut bcx = cargo::ops::create_bcx(&cmd.ws, &cmd.compile_opts, &interner, None).unwrap();
         if let Some(export_dir) = export_dir {
             for root in &bcx.roots {
                 bcx.unit_export_dirs
@@ -304,7 +304,6 @@ pub fn build_cli() -> Command {
                 .arg_target_triple("Build for the target triple")
                 .arg_artifact_dir()
                 .arg_manifest_path()
-                .arg_lockfile_path()
                 .arg_ignore_rust_version()
                 .after_help(color_print::cstr!(
                     "Run `<cyan,bold>cargo help build</>` for more detailed information.\n"
@@ -344,7 +343,6 @@ pub fn build_cli() -> Command {
                 )
                 .arg_artifact_dir()
                 .arg_manifest_path()
-                .arg_lockfile_path()
                 .arg_ignore_rust_version()
                 .after_help(color_print::cstr!(
                     "Run `<cyan,bold>cargo help rustdoc</>` for more detailed information.\n"
@@ -384,7 +382,6 @@ pub fn build_cli() -> Command {
                 .arg_unit_graph()
                 .arg_timings()
                 .arg_manifest_path()
-                .arg_lockfile_path()
                 .arg_ignore_rust_version()
                 .after_help(color_print::cstr!(
                     "Run `<cyan,bold>cargo help check</>` for more detailed information.\n"
