@@ -424,7 +424,15 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
             | UserIntent::Doc { .. }
             | UserIntent::Doctest
             | UserIntent::Bench => true,
-        };
+        }
+        // cargo-batch merges several build contexts into one, so `intent` only describes
+        // the first command of the batch. Doc units write into the artifact-dir regardless
+        // of the intent, so check the merged unit graph too.
+        || self
+            .bcx
+            .unit_graph
+            .keys()
+            .any(|unit| unit.mode.is_doc() || unit.mode.is_doc_scrape());
         let host_layout =
             Layout::new(self.bcx.ws, None, &dest, must_take_artifact_dir_lock, false)?;
         let mut targets = HashMap::new();

@@ -4,7 +4,7 @@
 #![warn(clippy::redundant_clone)]
 
 use cargo::core::compiler::{
-    unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, UnitInterner,
+    unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, UnitIndex, UnitInterner,
 };
 use cargo::core::Workspace;
 use cargo_util_terminal::Shell;
@@ -220,6 +220,9 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
             merged_bcx
                 .extra_compiler_args
                 .extend(bcx.extra_compiler_args);
+            merged_bcx.selected_dep_kinds.build |= bcx.selected_dep_kinds.build;
+            merged_bcx.selected_dep_kinds.normal |= bcx.selected_dep_kinds.normal;
+            merged_bcx.selected_dep_kinds.dev |= bcx.selected_dep_kinds.dev;
         } else {
             merged_bcx = Some(bcx)
         }
@@ -227,6 +230,17 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
 
     let mut bcx = merged_bcx.unwrap();
     bcx.do_uplift = false;
+
+    // `create_bcx` assigns unit indexes per build context, so after merging several
+    // of them the indexes are neither unique nor complete. Reassign them over the
+    // merged unit graph, the same way `create_bcx` does.
+    let mut units: Vec<_> = bcx.unit_graph.keys().cloned().collect();
+    units.sort();
+    bcx.unit_to_index = units
+        .into_iter()
+        .enumerate()
+        .map(|(i, unit)| (unit, UnitIndex(i as u64)))
+        .collect();
 
     if unit_graph {
         unit_graph::emit_serialized_unit_graph(&bcx.roots, &bcx.unit_graph, bcx.ws.gctx())?;
