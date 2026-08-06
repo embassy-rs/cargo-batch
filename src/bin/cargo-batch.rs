@@ -3,14 +3,14 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::redundant_clone)]
 
-use cargo::core::compiler::{
-    unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, UnitIndex, UnitInterner,
-};
 use cargo::core::Workspace;
-use cargo_util_terminal::Shell;
+use cargo::core::compiler::{
+    BuildContext, BuildRunner, DefaultExecutor, Executor, UnitIndex, UnitInterner, unit_graph,
+};
 use cargo::ops::{CompileOptions, OutputFormat};
 use cargo::util::network::http::{http_handle, needs_custom_http_transport};
-use cargo::util::{command_prelude, CliResult, GlobalContext};
+use cargo::util::{CliResult, GlobalContext, command_prelude};
+use cargo_util_terminal::Shell;
 use std::sync::Arc;
 use std::{env, io};
 
@@ -86,6 +86,11 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                 .action(ArgAction::Append)
                 .global(true),
         )
+        .arg(
+            opt("chunk-size", "Max commands per batch pass (0 = unlimited)")
+                .value_name("N")
+                .global(true),
+        )
         .try_get_matches_from(global_args)?;
 
     config_configure(gctx, &global_args)?;
@@ -106,7 +111,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
             .collect()
     } else {
         subargs
-            .map(|x| x.iter().map(|x| x.clone()).collect::<Vec<_>>())
+            .map(|x| x.iter().map(|x| x.clone()).collect::<Vec<String>>())
             .collect()
     };
 
@@ -183,75 +188,102 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
         }
     }
 
-    let interner = UnitInterner::new();
-    let mut merged_bcx: Option<BuildContext<'_, '_>> = None;
+    let chunk_size = global_args
+        .get_one::<String>("chunk-size")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut chunk_size = if chunk_size == 0 {
+        cmds.len()
+    } else {
+        chunk_size
+    };
+    // Unit-graph mode needs one coherent graph; don't chunk.
+    if unit_graph {
+        chunk_size = cmds.len();
+    }
+    let num_chunks = (cmds.len() + chunk_size - 1) / chunk_size;
 
-    for cmd in &mut cmds {
-        let export_dir = cmd.compile_opts.build_config.export_dir.take();
+    for (chunk_idx, chunk) in cmds.chunks_mut(chunk_size).enumerate() {
+        if num_chunks > 1 {
+            eprintln!(
+                "cargo-batch: chunk {}/{} ({} commands)",
+                chunk_idx + 1,
+                num_chunks,
+                chunk.len()
+            );
+        }
 
-        let mut bcx = cargo::ops::create_bcx(&cmd.ws, &cmd.compile_opts, &interner, None).unwrap();
-        if let Some(export_dir) = export_dir {
-            for root in &bcx.roots {
-                bcx.unit_export_dirs
-                    .insert(root.clone(), export_dir.clone());
+        let interner = UnitInterner::new();
+        let mut merged_bcx: Option<BuildContext> = None;
+
+        for cmd in chunk.iter_mut() {
+            let export_dir = cmd.compile_opts.build_config.export_dir.take();
+
+            let mut bcx =
+                cargo::ops::create_bcx(&cmd.ws, &cmd.compile_opts, &interner, None).unwrap();
+            if let Some(export_dir) = export_dir {
+                for root in &bcx.roots {
+                    bcx.unit_export_dirs
+                        .insert(root.clone(), export_dir.clone());
+                }
+            }
+
+            if let Some(merged_bcx) = &mut merged_bcx {
+                // merge!!!
+                merged_bcx.unit_graph.extend(bcx.unit_graph);
+                merged_bcx.roots.extend(bcx.roots);
+                merged_bcx.unit_export_dirs.extend(bcx.unit_export_dirs);
+                merged_bcx.all_kinds.extend(bcx.all_kinds);
+                merged_bcx
+                    .target_data
+                    .target_config
+                    .extend(bcx.target_data.target_config);
+                merged_bcx
+                    .target_data
+                    .target_info
+                    .extend(bcx.target_data.target_info);
+                merged_bcx.packages.packages.extend(bcx.packages.packages);
+                merged_bcx
+                    .packages
+                    .sources
+                    .borrow_mut()
+                    .add_source_map(bcx.packages.sources.into_inner());
+                merged_bcx
+                    .extra_compiler_args
+                    .extend(bcx.extra_compiler_args);
+                merged_bcx.selected_dep_kinds.build |= bcx.selected_dep_kinds.build;
+                merged_bcx.selected_dep_kinds.normal |= bcx.selected_dep_kinds.normal;
+                merged_bcx.selected_dep_kinds.dev |= bcx.selected_dep_kinds.dev;
+            } else {
+                merged_bcx = Some(bcx)
             }
         }
 
-        if let Some(merged_bcx) = &mut merged_bcx {
-            // merge!!!
-            merged_bcx.unit_graph.extend(bcx.unit_graph);
-            merged_bcx.roots.extend(bcx.roots);
-            merged_bcx.unit_export_dirs.extend(bcx.unit_export_dirs);
-            merged_bcx.all_kinds.extend(bcx.all_kinds);
-            merged_bcx
-                .target_data
-                .target_config
-                .extend(bcx.target_data.target_config);
-            merged_bcx
-                .target_data
-                .target_info
-                .extend(bcx.target_data.target_info);
-            merged_bcx.packages.packages.extend(bcx.packages.packages);
-            merged_bcx
-                .packages
-                .sources
-                .borrow_mut()
-                .add_source_map(bcx.packages.sources.into_inner());
-            merged_bcx
-                .extra_compiler_args
-                .extend(bcx.extra_compiler_args);
-            merged_bcx.selected_dep_kinds.build |= bcx.selected_dep_kinds.build;
-            merged_bcx.selected_dep_kinds.normal |= bcx.selected_dep_kinds.normal;
-            merged_bcx.selected_dep_kinds.dev |= bcx.selected_dep_kinds.dev;
-        } else {
-            merged_bcx = Some(bcx)
+        let mut bcx = merged_bcx.unwrap();
+        bcx.do_uplift = false;
+
+        // `create_bcx` assigns unit indexes per build context, so after merging several
+        // of them the indexes are neither unique nor complete. Reassign them over the
+        // merged unit graph, the same way `create_bcx` does.
+        let mut units: Vec<_> = bcx.unit_graph.keys().cloned().collect();
+        units.sort();
+        bcx.unit_to_index = units
+            .into_iter()
+            .enumerate()
+            .map(|(i, unit)| (unit, UnitIndex(i as u64)))
+            .collect();
+
+        if unit_graph {
+            unit_graph::emit_serialized_unit_graph(&bcx.roots, &bcx.unit_graph, bcx.ws.gctx())?;
+            return Ok(());
         }
+
+        // util::profile disappeared between cargo 1.76 and cargo 1.78
+        // let _p = cargo::util::profile::start("compiling");
+        let cx = BuildRunner::new(&bcx)?;
+        let exec: Arc<dyn Executor> = Arc::new(DefaultExecutor);
+        cx.compile(&exec)?;
     }
-
-    let mut bcx = merged_bcx.unwrap();
-    bcx.do_uplift = false;
-
-    // `create_bcx` assigns unit indexes per build context, so after merging several
-    // of them the indexes are neither unique nor complete. Reassign them over the
-    // merged unit graph, the same way `create_bcx` does.
-    let mut units: Vec<_> = bcx.unit_graph.keys().cloned().collect();
-    units.sort();
-    bcx.unit_to_index = units
-        .into_iter()
-        .enumerate()
-        .map(|(i, unit)| (unit, UnitIndex(i as u64)))
-        .collect();
-
-    if unit_graph {
-        unit_graph::emit_serialized_unit_graph(&bcx.roots, &bcx.unit_graph, bcx.ws.gctx())?;
-        return Ok(());
-    }
-
-    // util::profile disappeared between cargo 1.76 and cargo 1.78
-    // let _p = cargo::util::profile::start("compiling");
-    let cx = BuildRunner::new(&bcx)?;
-    let exec: Arc<dyn Executor> = Arc::new(DefaultExecutor);
-    cx.compile(&exec)?;
 
     Ok(())
 }
