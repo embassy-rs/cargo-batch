@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::str::{self, FromStr};
 
 use crate::AlreadyPrintedError;
@@ -1827,8 +1828,8 @@ note: only a feature named `default` will be enabled by default"
     let default_run = normalized_package.default_run.clone();
     let metabuild = normalized_package.metabuild.clone().map(|sov| sov.0);
     let manifest = Manifest::new(
-        contents.map(Rc::new),
-        document.map(Rc::new),
+        contents.map(Arc::new),
+        document.map(Arc::new),
         Some(Rc::new(original_toml)),
         Rc::new(normalized_toml),
         summary,
@@ -2017,8 +2018,8 @@ fn to_virtual_manifest(
         bail!("virtual manifests must be configured with [workspace]");
     }
     let manifest = VirtualManifest::new(
-        contents.map(Rc::new),
-        document.map(Rc::new),
+        contents.map(Arc::new),
+        document.map(Arc::new),
         Some(Rc::new(original_toml)),
         Rc::new(normalized_toml),
         replace,

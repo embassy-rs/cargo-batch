@@ -2095,9 +2095,14 @@ struct ManifestErrorContext {
     /// The path to the manifest.
     path: PathBuf,
     /// The locations of various spans within the manifest.
-    spans: Option<toml::Spanned<toml::de::DeTable<'static>>>,
+    ///
+    /// Shared with the `Manifest` (and with the contexts of every other unit
+    /// from the same package) rather than copied: one context is built per unit
+    /// up front, and a deep copy of the TOML document per unit costs hundreds of
+    /// megabytes on large batched builds.
+    spans: Option<Arc<toml::Spanned<toml::de::DeTable<'static>>>>,
     /// The raw manifest contents.
-    contents: Option<String>,
+    contents: Option<Arc<String>>,
     /// A lookup for all the unambiguous renamings, mapping from the original package
     /// name to the renamed one.
     rename_table: HashMap<InternedString, InternedString>,
@@ -2224,7 +2229,7 @@ fn on_stderr_line_inner(
                 crate_name.as_str()
             )))
             .element(
-                Snippet::source(contents)
+                Snippet::source(contents.as_str())
                     .path(rel_path)
                     .annotation(AnnotationKind::Context.span(span)),
             )];
@@ -2475,8 +2480,8 @@ impl ManifestErrorContext {
         let bcx = build_runner.bcx;
         ManifestErrorContext {
             path: unit.pkg.manifest_path().to_owned(),
-            spans: unit.pkg.manifest().document().cloned(),
-            contents: unit.pkg.manifest().contents().map(String::from),
+            spans: unit.pkg.manifest().document_shared(),
+            contents: unit.pkg.manifest().contents_shared(),
             requested_kinds: bcx.target_data.requested_kinds().to_owned(),
             host_name: bcx.rustc().host,
             rename_table,
@@ -2544,7 +2549,7 @@ impl ManifestErrorContext {
         // [target.'cfg(something)'.dependencies]. We filter out target tables
         // that don't match a requested target or a requested cfg.
         if let Some(target) = spans
-            .as_ref()
+            .get_ref()
             .get("target")
             .and_then(|t| t.as_ref().as_table())
         {

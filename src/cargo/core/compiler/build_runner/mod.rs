@@ -14,7 +14,6 @@ use anyhow::{Context as _, bail};
 use cargo_util::paths;
 use cargo_util_terminal::report::{Level, Message};
 use filetime::FileTime;
-use itertools::Itertools;
 use jobserver::Client;
 
 use super::RustdocFingerprint;
@@ -204,22 +203,30 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
         queue.execute(&mut self)?;
 
         // Add `OUT_DIR` to env vars if unit has a build script.
+        //
+        // cargo-batch merges several build contexts into one, so `roots` holds units of
+        // the same package built with different features, each running its own build
+        // script. Dedup on the build script metadata (which is what `extra_env` is keyed
+        // by) rather than on the package, or only the first of them gets its `OUT_DIR`.
         let units_with_build_script = &self
             .bcx
             .roots
             .iter()
             .filter(|unit| self.build_scripts.contains_key(unit))
-            .dedup_by(|x, y| x.pkg.package_id() == y.pkg.package_id())
             .collect::<Vec<_>>();
+        let mut seen_script_metas = HashSet::new();
         for unit in units_with_build_script {
             for dep in &self.bcx.unit_graph[unit] {
                 if dep.unit.mode.is_run_custom_build() {
+                    let script_meta = self.get_run_build_script_metadata(&dep.unit);
+                    if !seen_script_metas.insert(script_meta) {
+                        continue;
+                    }
                     let out_dir = if self.bcx.gctx.cli_unstable().build_dir_new_layout {
                         self.files().out_dir_new_layout(&dep.unit)
                     } else {
                         self.files().build_script_out_dir(&dep.unit)
                     };
-                    let script_meta = self.get_run_build_script_metadata(&dep.unit);
                     self.compilation
                         .extra_env
                         .entry(script_meta)
@@ -426,13 +433,14 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
             | UserIntent::Bench => true,
         }
         // cargo-batch merges several build contexts into one, so `intent` only describes
-        // the first command of the batch. Doc units write into the artifact-dir regardless
-        // of the intent, so check the merged unit graph too.
-        || self
-            .bcx
-            .unit_graph
-            .keys()
-            .any(|unit| unit.mode.is_doc() || unit.mode.is_doc_scrape());
+        // the first command of the batch. Doc, doctest and test units all need the
+        // artifact-dir regardless of the intent, so check the merged unit graph too.
+        || self.bcx.unit_graph.keys().any(|unit| {
+            unit.mode.is_doc()
+                || unit.mode.is_doc_scrape()
+                || unit.mode.is_doc_test()
+                || unit.mode == CompileMode::Test
+        });
         let host_layout =
             Layout::new(self.bcx.ws, None, &dest, must_take_artifact_dir_lock, false)?;
         let mut targets = HashMap::new();

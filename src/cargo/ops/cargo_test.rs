@@ -67,17 +67,51 @@ impl UnitTestError {
 pub fn run_tests(ws: &Workspace<'_>, options: &TestOptions, test_args: &[&str]) -> CliResult {
     let compilation = compile_tests(ws, options)?;
 
-    if options.no_run {
-        if !options.compile_opts.build_config.emit_json() {
-            display_no_run_information(ws, test_args, &compilation, "unittests")?;
+    run_compiled_tests(
+        ws,
+        &options.compile_opts,
+        options.no_run,
+        options.no_fail_fast,
+        test_args,
+        &compilation,
+        &|_| true,
+    )
+}
+
+/// Runs tests that are already compiled.
+///
+/// This is [`run_tests`] without the compilation step, for callers that build
+/// the test binaries themselves. `cargo-batch` does: it merges the units of
+/// many commands into one build, so the tests of one command are only a subset
+/// of the resulting [`Compilation`]. `filter` picks them out, by root unit.
+pub fn run_compiled_tests(
+    ws: &Workspace<'_>,
+    compile_opts: &ops::CompileOptions,
+    no_run: bool,
+    no_fail_fast: bool,
+    test_args: &[&str],
+    compilation: &Compilation<'_>,
+    filter: &dyn Fn(&Unit) -> bool,
+) -> CliResult {
+    if no_run {
+        if !compile_opts.build_config.emit_json() {
+            display_no_run_information(ws, test_args, compilation, filter, "unittests")?;
         }
         return Ok(());
     }
-    let mut errors = run_unit_tests(ws, options, test_args, &compilation, TestKind::Test)?;
+    let mut errors = run_unit_tests(
+        ws,
+        compile_opts,
+        no_fail_fast,
+        test_args,
+        compilation,
+        filter,
+        TestKind::Test,
+    )?;
 
-    let doctest_errors = run_doc_tests(ws, options, test_args, &compilation)?;
+    let doctest_errors = run_doc_tests(ws, compile_opts, no_fail_fast, test_args, compilation, filter)?;
     errors.extend(doctest_errors);
-    no_fail_fast_err(ws, &options.compile_opts, &errors)
+    no_fail_fast_err(ws, compile_opts, &errors)
 }
 
 /// Compiles and runs benchmarks.
@@ -89,7 +123,7 @@ pub fn run_benches(ws: &Workspace<'_>, options: &TestOptions, args: &[&str]) -> 
 
     if options.no_run {
         if !options.compile_opts.build_config.emit_json() {
-            display_no_run_information(ws, args, &compilation, "benches")?;
+            display_no_run_information(ws, args, &compilation, &|_| true, "benches")?;
         }
         return Ok(());
     }
@@ -97,7 +131,15 @@ pub fn run_benches(ws: &Workspace<'_>, options: &TestOptions, args: &[&str]) -> 
     let mut args = args.to_vec();
     args.push("--bench");
 
-    let errors = run_unit_tests(ws, options, &args, &compilation, TestKind::Bench)?;
+    let errors = run_unit_tests(
+        ws,
+        &options.compile_opts,
+        options.no_fail_fast,
+        &args,
+        &compilation,
+        &|_| true,
+        TestKind::Bench,
+    )?;
     no_fail_fast_err(ws, &options.compile_opts, &errors)
 }
 
@@ -113,9 +155,11 @@ fn compile_tests<'a>(ws: &Workspace<'a>, options: &TestOptions) -> CargoResult<C
 /// If `--no-fail-fast` is *not* used, then this returns an `Err`.
 fn run_unit_tests(
     ws: &Workspace<'_>,
-    options: &TestOptions,
+    compile_opts: &ops::CompileOptions,
+    no_fail_fast: bool,
     test_args: &[&str],
     compilation: &Compilation<'_>,
+    filter: &dyn Fn(&Unit) -> bool,
     test_kind: TestKind,
 ) -> Result<Vec<UnitTestError>, CliError> {
     let gctx = ws.gctx();
@@ -127,7 +171,7 @@ fn run_unit_tests(
         path,
         script_metas,
         env,
-    } in compilation.tests.iter()
+    } in compilation.tests.iter().filter(|t| filter(&t.unit))
     {
         let (exe_display, mut cmd) = cmd_builds(
             gctx,
@@ -156,9 +200,9 @@ fn run_unit_tests(
                 unit: unit.clone(),
                 kind: test_kind,
             };
-            report_test_error(ws, test_args, &options.compile_opts, &unit_err, e);
+            report_test_error(ws, test_args, compile_opts, &unit_err, e);
             errors.push(unit_err);
-            if !options.no_fail_fast {
+            if !no_fail_fast {
                 return Err(CliError::code(code));
             }
         }
@@ -172,15 +216,21 @@ fn run_unit_tests(
 /// If `--no-fail-fast` is *not* used, then this returns an `Err`.
 fn run_doc_tests(
     ws: &Workspace<'_>,
-    options: &TestOptions,
+    compile_opts: &ops::CompileOptions,
+    no_fail_fast: bool,
     test_args: &[&str],
     compilation: &Compilation<'_>,
+    filter: &dyn Fn(&Unit) -> bool,
 ) -> Result<Vec<UnitTestError>, CliError> {
     let gctx = ws.gctx();
     let mut errors = Vec::new();
     let color = gctx.shell().color_choice();
 
-    for doctest_info in &compilation.to_doc_test {
+    for doctest_info in compilation
+        .to_doc_test
+        .iter()
+        .filter(|d| filter(&d.unit))
+    {
         let Doctest {
             args,
             unstable_opts,
@@ -261,9 +311,9 @@ fn run_doc_tests(
                 unit: unit.clone(),
                 kind: TestKind::Doctest,
             };
-            report_test_error(ws, test_args, &options.compile_opts, &unit_err, e);
+            report_test_error(ws, test_args, compile_opts, &unit_err, e);
             errors.push(unit_err);
-            if !options.no_fail_fast {
+            if !no_fail_fast {
                 return Err(CliError::code(code));
             }
         }
@@ -278,6 +328,7 @@ fn display_no_run_information(
     ws: &Workspace<'_>,
     test_args: &[&str],
     compilation: &Compilation<'_>,
+    filter: &dyn Fn(&Unit) -> bool,
     exec_type: &str,
 ) -> CargoResult<()> {
     let gctx = ws.gctx();
@@ -287,7 +338,7 @@ fn display_no_run_information(
         path,
         script_metas,
         env,
-    } in compilation.tests.iter()
+    } in compilation.tests.iter().filter(|t| filter(&t.unit))
     {
         let (exe_display, cmd) = cmd_builds(
             gctx,

@@ -4,13 +4,14 @@
 #![warn(clippy::redundant_clone)]
 
 use cargo::core::compiler::{
-    unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, UnitIndex, UnitInterner,
+    unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, Unit, UnitIndex, UnitInterner,
 };
 use cargo::core::Workspace;
 use cargo_util_terminal::Shell;
 use cargo::ops::{CompileOptions, OutputFormat};
 use cargo::util::network::http::{http_handle, needs_custom_http_transport};
 use cargo::util::{command_prelude, CliResult, GlobalContext};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::{env, io};
 
@@ -93,10 +94,33 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
 
     let unit_graph = global_args.flag("unit-graph");
 
-    struct CommandState<'a> {
-        ws: Workspace<'a>,
-        compile_opts: CompileOptions,
+    /// What a `test` command wants done once its units are built.
+    struct TestState {
+        no_run: bool,
+        no_fail_fast: bool,
+        args: Vec<String>,
+        /// Root units of this command, filled in when its build context is
+        /// created. Everything is compiled as one merged build, so this is what
+        /// tells the tests of this command apart from everyone else's.
+        roots: Vec<Unit>,
     }
+
+    struct CommandState {
+        /// Index into `workspaces`.
+        ws: usize,
+        compile_opts: CompileOptions,
+        /// `Some` if this is a `test` command.
+        test: Option<TestState>,
+    }
+
+    // Loading a workspace parses its manifest and every member's manifest, which
+    // is expensive in both time and memory. A batch typically contains many
+    // commands for the same manifest (one per feature combination), so load each
+    // one once and share it. The only per-command inputs to `args.workspace()`
+    // are the root manifest path and `--ignore-rust-version`, so key on those.
+    let mut workspaces: Vec<Workspace<'_>> = Vec::new();
+    let mut workspace_index: std::collections::HashMap<(std::path::PathBuf, Option<bool>), usize> =
+        Default::default();
 
     let subargs: Vec<Vec<String>> = if global_args.get_flag("stdin") {
         io::stdin()
@@ -115,14 +139,25 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
         let cli = build_cli();
         let args = cli.try_get_matches_from([String::new()].into_iter().chain(args.into_iter()))?;
         let (subcmd, args) = args.subcommand().unwrap();
+
+        let ws_key = (args.root_manifest(gctx)?, args.honor_rust_version());
+        let ws_idx = match workspace_index.get(&ws_key) {
+            Some(&idx) => idx,
+            None => {
+                workspaces.push(args.workspace(gctx)?);
+                let idx = workspaces.len() - 1;
+                workspace_index.insert(ws_key, idx);
+                idx
+            }
+        };
+        let ws = &workspaces[ws_idx];
+
         match subcmd {
             "build" => {
-                let ws = args.workspace(gctx)?;
-
                 let mut compile_opts = args.compile_options(
                     gctx,
                     UserIntent::Build,
-                    Some(&ws),
+                    Some(ws),
                     ProfileChecking::Custom,
                 )?;
                 if let Some(out_dir) = args.value_of_path("artifact-dir", gctx) {
@@ -130,10 +165,66 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                 }
 
                 //println!("compile opts: {:#?}", compile_opts);
-                cmds.push(CommandState { ws, compile_opts });
+                cmds.push(CommandState {
+                    ws: ws_idx,
+                    compile_opts,
+                    test: None,
+                });
+            }
+            "test" => {
+                let mut compile_opts = args.compile_options(
+                    gctx,
+                    UserIntent::Test,
+                    Some(ws),
+                    ProfileChecking::Custom,
+                )?;
+                compile_opts.build_config.requested_profile =
+                    args.get_profile_name("test", ProfileChecking::Custom)?;
+
+                // `TESTNAME` is actually an argument of the test binary, but
+                // it's important, so it gets a name of its own.
+                let test_name = args.get_one::<String>("TESTNAME");
+                let test_args = test_name
+                    .into_iter()
+                    .chain(args.get_many::<String>("args").unwrap_or_default())
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                let no_run = args.flag("no-run");
+                if args.flag("doc") {
+                    if compile_opts.filter.is_specific() {
+                        return Err(anyhow::format_err!(
+                            "can't mix --doc with other target selecting options"
+                        )
+                        .into());
+                    }
+                    if no_run {
+                        return Err(anyhow::format_err!(
+                            "can't skip running doc tests with --no-run"
+                        )
+                        .into());
+                    }
+                    compile_opts.build_config.intent = UserIntent::Doctest;
+                    compile_opts.filter = cargo::ops::CompileFilter::lib_only();
+                } else if test_name.is_some() && !compile_opts.filter.is_specific() {
+                    // If `TESTNAME` is given, the user knows what they want to
+                    // run, so don't build targets the default filter would pull
+                    // in (examples, most notably).
+                    compile_opts.filter = cargo::ops::CompileFilter::all_test_targets();
+                }
+
+                cmds.push(CommandState {
+                    ws: ws_idx,
+                    compile_opts,
+                    test: Some(TestState {
+                        no_run,
+                        no_fail_fast: args.flag("no-fail-fast"),
+                        args: test_args,
+                        roots: Vec::new(),
+                    }),
+                });
             }
             "check" => {
-                let ws = args.workspace(gctx)?;
                 // This is a legacy behavior that causes `cargo check` to pass `--test`.
                 let test = matches!(
                     args.get_one::<String>("profile").map(String::as_str),
@@ -141,12 +232,15 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                 );
                 let mode = UserIntent::Check { test };
                 let compile_opts =
-                    args.compile_options(gctx, mode, Some(&ws), ProfileChecking::LegacyTestOnly)?;
+                    args.compile_options(gctx, mode, Some(ws), ProfileChecking::LegacyTestOnly)?;
 
-                cmds.push(CommandState { ws, compile_opts });
+                cmds.push(CommandState {
+                    ws: ws_idx,
+                    compile_opts,
+                    test: None,
+                });
             }
             "rustdoc" => {
-                let ws = args.workspace(gctx)?;
                 let output_format = if let Some(output_format) = args._value_of("output-format") {
                     gctx.cli_unstable()
                         .fail_if_stable_opt("--output-format", 12103)?;
@@ -163,7 +257,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                         deps: false,
                         json: matches!(output_format, OutputFormat::Json),
                     },
-                    Some(&ws),
+                    Some(ws),
                     ProfileChecking::Custom,
                 )?;
                 if let Some(out_dir) = args.value_of_path("artifact-dir", gctx) {
@@ -177,7 +271,11 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                 };
 
                 //println!("compile opts: {:#?}", compile_opts);
-                cmds.push(CommandState { ws, compile_opts });
+                cmds.push(CommandState {
+                    ws: ws_idx,
+                    compile_opts,
+                    test: None,
+                });
             }
             _ => unreachable!(),
         }
@@ -189,12 +287,18 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
     for cmd in &mut cmds {
         let export_dir = cmd.compile_opts.build_config.export_dir.take();
 
-        let mut bcx = cargo::ops::create_bcx(&cmd.ws, &cmd.compile_opts, &interner, None).unwrap();
+        let mut bcx =
+            cargo::ops::create_bcx(&workspaces[cmd.ws], &cmd.compile_opts, &interner, None)
+                .unwrap();
         if let Some(export_dir) = export_dir {
             for root in &bcx.roots {
                 bcx.unit_export_dirs
                     .insert(root.clone(), export_dir.clone());
             }
+        }
+
+        if let Some(test) = &mut cmd.test {
+            test.roots = bcx.roots.clone();
         }
 
         if let Some(merged_bcx) = &mut merged_bcx {
@@ -231,6 +335,13 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
     let mut bcx = merged_bcx.unwrap();
     bcx.do_uplift = false;
 
+    // Two commands can ask for the same unit (the same features, or one command
+    // that is a subset of another), and merging their roots then lists it twice.
+    // `compile` collects outputs per root, so a duplicate root means a duplicate
+    // entry in `compilation.tests`, i.e. a test binary run twice.
+    let mut seen = HashSet::new();
+    bcx.roots.retain(|unit| seen.insert(unit.clone()));
+
     // `create_bcx` assigns unit indexes per build context, so after merging several
     // of them the indexes are neither unique nor complete. Reassign them over the
     // merged unit graph, the same way `create_bcx` does.
@@ -251,7 +362,26 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
     // let _p = cargo::util::profile::start("compiling");
     let cx = BuildRunner::new(&bcx)?;
     let exec: Arc<dyn Executor> = Arc::new(DefaultExecutor);
-    cx.compile(&exec)?;
+    let compilation = cx.compile(&exec)?;
+
+    // Everything is built now. Run the tests of each `test` command, in the
+    // order the commands were given, over the units that command asked for.
+    for cmd in &cmds {
+        let Some(test) = &cmd.test else { continue };
+
+        let roots: HashSet<&Unit> = test.roots.iter().collect();
+        let test_args: Vec<&str> = test.args.iter().map(String::as_str).collect();
+
+        cargo::ops::run_compiled_tests(
+            &workspaces[cmd.ws],
+            &cmd.compile_opts,
+            test.no_run,
+            test.no_fail_fast,
+            &test_args,
+            &compilation,
+            &|unit| roots.contains(unit),
+        )?;
+    }
 
     Ok(())
 }
@@ -360,6 +490,66 @@ pub fn build_cli() -> Command {
                 .arg_ignore_rust_version()
                 .after_help(color_print::cstr!(
                     "Run `<cyan,bold>cargo help rustdoc</>` for more detailed information.\n"
+                )),
+        )
+        .subcommand(
+            subcommand("test")
+                // subcommand aliases are handled in aliased_command()
+                // .alias("t")
+                .about("Execute all unit and integration tests and build examples of a local package")
+                .arg(
+                    Arg::new("TESTNAME")
+                        .action(ArgAction::Set)
+                        .help("If specified, only run tests containing this string in their names"),
+                )
+                .arg(
+                    Arg::new("args")
+                        .value_name("ARGS")
+                        .help("Arguments for the test binary")
+                        .num_args(0..)
+                        .last(true),
+                )
+                .arg(flag("no-run", "Compile, but don't run tests"))
+                .arg(flag("no-fail-fast", "Run all tests regardless of failure"))
+                .arg_future_incompat_report()
+                .arg_message_format()
+                .arg(
+                    flag(
+                        "quiet",
+                        "Display one character per test instead of one line",
+                    )
+                    .short('q'),
+                )
+                .arg_package_spec(
+                    "Package to run tests for",
+                    "Test all packages in the workspace",
+                    "Exclude packages from the test",
+                )
+                .arg_targets_all(
+                    "Test only this package's library",
+                    "Test only the specified binary",
+                    "Test all binaries",
+                    "Test only the specified example",
+                    "Test all examples",
+                    "Test only the specified test target",
+                    "Test all targets that have `test = true` set",
+                    "Test only the specified bench target",
+                    "Test all targets that have `bench = true` set",
+                    "Test all targets (does not include doctests)",
+                )
+                .arg(
+                    flag("doc", "Test only this library's documentation")
+                        .help_heading(heading::TARGET_SELECTION),
+                )
+                .arg_features()
+                .arg_release("Build artifacts in release mode, with optimizations")
+                .arg_profile("Build artifacts with the specified profile")
+                .arg_target_triple("Build for the target triple")
+                .arg_manifest_path()
+                .arg_ignore_rust_version()
+                .after_help(color_print::cstr!(
+                    "Run `<cyan,bold>cargo help test</>` for more detailed information.\n\
+                     Run `<cyan,bold>cargo test -- --help</>` for test binary options.\n",
                 )),
         )
         .subcommand(

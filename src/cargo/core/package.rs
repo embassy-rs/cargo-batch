@@ -280,6 +280,32 @@ impl hash::Hash for Package {
     }
 }
 
+thread_local! {
+    /// Process-wide cache of loaded `Package`s, keyed by `PackageId`.
+    ///
+    /// A `PackageId` uniquely determines a manifest, so every `PackageSet` that
+    /// needs a given package can share one `Package` (and therefore one parsed
+    /// `Manifest`) instead of re-reading and re-parsing the `Cargo.toml`.
+    ///
+    /// This matters for `cargo-batch`, which resolves many builds in a single
+    /// process: without this, each resolve produces its own copy of every
+    /// manifest, and the copies stay alive as long as any `Unit` referencing
+    /// them does. Manifests are not cheap (`contents`, the spanned TOML
+    /// document, plus the original and normalized `TomlManifest`), so for
+    /// feature-heavy crates that is hundreds of megabytes of exact duplicates.
+    static PACKAGE_CACHE: RefCell<HashMap<PackageId, Package>> = RefCell::new(HashMap::new());
+}
+
+fn package_cache_get(id: PackageId) -> Option<Package> {
+    PACKAGE_CACHE.with(|c| c.borrow().get(&id).cloned())
+}
+
+fn package_cache_insert(id: PackageId, pkg: Package) {
+    PACKAGE_CACHE.with(|c| {
+        c.borrow_mut().insert(id, pkg);
+    });
+}
+
 /// A set of packages, with the intent to download.
 ///
 /// This is primarily used to convert a set of `PackageId`s to `Package`s. It
@@ -377,6 +403,10 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
         if let Some(pkg) = slot.get() {
             return CargoResult::Ok(pkg);
         }
+        if let Some(pkg) = package_cache_get(id) {
+            assert!(slot.set(pkg).is_ok());
+            return CargoResult::Ok(slot.get().unwrap());
+        }
         let source = self
             .set
             .sources
@@ -435,6 +465,7 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
             }
         }?;
 
+        package_cache_insert(id, pkg.clone());
         assert!(slot.set(pkg).is_ok());
         Ok(slot.get().unwrap())
     }

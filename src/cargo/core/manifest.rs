@@ -62,8 +62,8 @@ impl EitherManifest {
 #[derive(Clone, Debug)]
 pub struct Manifest {
     // alternate forms of manifests:
-    contents: Option<Rc<String>>,
-    document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+    contents: Option<Arc<String>>,
+    document: Option<Arc<toml::Spanned<toml::de::DeTable<'static>>>>,
     original_toml: Option<Rc<TomlManifest>>,
     normalized_toml: Rc<TomlManifest>,
     summary: Summary,
@@ -109,8 +109,8 @@ pub struct Warnings(Vec<DelayedWarning>);
 #[derive(Clone, Debug)]
 pub struct VirtualManifest {
     // alternate forms of manifests:
-    contents: Option<Rc<String>>,
-    document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+    contents: Option<Arc<String>>,
+    document: Option<Arc<toml::Spanned<toml::de::DeTable<'static>>>>,
     original_toml: Option<Rc<TomlManifest>>,
     normalized_toml: Rc<TomlManifest>,
 
@@ -496,8 +496,8 @@ compact_debug! {
 
 impl Manifest {
     pub fn new(
-        contents: Option<Rc<String>>,
-        document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+        contents: Option<Arc<String>>,
+        document: Option<Arc<toml::Spanned<toml::de::DeTable<'static>>>>,
         original_toml: Option<Rc<TomlManifest>>,
         normalized_toml: Rc<TomlManifest>,
         summary: Summary,
@@ -562,6 +562,10 @@ impl Manifest {
     pub fn contents(&self) -> Option<&str> {
         self.contents.as_deref().map(|c| c.as_str())
     }
+    /// The raw contents of the original TOML, shared rather than copied
+    pub fn contents_shared(&self) -> Option<Arc<String>> {
+        self.contents.clone()
+    }
     /// See [`Manifest::normalized_toml`] for what "normalized" means
     pub fn to_normalized_contents(&self) -> CargoResult<String> {
         let toml = toml::to_string_pretty(self.normalized_toml())?;
@@ -570,6 +574,10 @@ impl Manifest {
     /// Collection of spans for the original TOML
     pub fn document(&self) -> Option<&toml::Spanned<toml::de::DeTable<'static>>> {
         self.document.as_deref()
+    }
+    /// Collection of spans for the original TOML, shared rather than copied
+    pub fn document_shared(&self) -> Option<Arc<toml::Spanned<toml::de::DeTable<'static>>>> {
+        self.document.clone()
     }
     /// The [`TomlManifest`] as parsed from [`Manifest::document`]
     pub fn original_toml(&self) -> Option<&TomlManifest> {
@@ -744,8 +752,8 @@ impl Manifest {
 
 impl VirtualManifest {
     pub fn new(
-        contents: Option<Rc<String>>,
-        document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+        contents: Option<Arc<String>>,
+        document: Option<Arc<toml::Spanned<toml::de::DeTable<'static>>>>,
         original_toml: Option<Rc<TomlManifest>>,
         normalized_toml: Rc<TomlManifest>,
         replace: Vec<(PackageIdSpec, Dependency)>,
