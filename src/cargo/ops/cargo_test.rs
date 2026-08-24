@@ -224,83 +224,16 @@ fn run_doc_tests(
 ) -> Result<Vec<UnitTestError>, CliError> {
     let gctx = ws.gctx();
     let mut errors = Vec::new();
-    let color = gctx.shell().color_choice();
 
     for doctest_info in compilation
         .to_doc_test
         .iter()
         .filter(|d| filter(&d.unit))
     {
-        let Doctest {
-            args,
-            unstable_opts,
-            unit,
-            linker,
-            script_metas,
-            env,
-        } = doctest_info;
+        let unit = &doctest_info.unit;
 
         gctx.shell().status("Doc-tests", unit.target.name())?;
-        let mut p = compilation.rustdoc_process(unit, script_metas.as_ref())?;
-
-        for (var, value) in env {
-            p.env(var, value);
-        }
-
-        let color_arg = match color {
-            ColorChoice::Always => "always",
-            ColorChoice::Never => "never",
-            ColorChoice::CargoAuto => "auto",
-        };
-        p.arg("--color").arg(color_arg);
-
-        p.arg("--crate-name").arg(&unit.target.crate_name());
-        p.arg("--test");
-
-        add_path_args(ws, unit, &mut p);
-        p.arg("--test-run-directory").arg(unit.pkg.root());
-
-        unit.kind.add_target_arg(&mut p);
-
-        if let Some((runtool, runtool_args)) = compilation.target_runner(unit.kind) {
-            p.arg("--test-runtool").arg(runtool);
-            for arg in runtool_args {
-                p.arg("--test-runtool-arg").arg(arg);
-            }
-        }
-        if let Some(linker) = linker {
-            let mut joined = OsString::from("linker=");
-            joined.push(linker);
-            p.arg("-C").arg(joined);
-        }
-
-        if unit.profile.panic != PanicStrategy::Unwind {
-            p.arg("-C").arg(format!("panic={}", unit.profile.panic));
-        }
-
-        for native_dep in compilation.native_dirs.iter() {
-            p.arg("-L").arg(native_dep);
-        }
-
-        for arg in test_args {
-            p.arg("--test-args").arg(arg);
-        }
-
-        if gctx.shell().verbosity() == Verbosity::Quiet {
-            p.arg("--test-args").arg("--quiet");
-        }
-
-        p.args(unit.pkg.manifest().lint_rustflags());
-
-        p.args(args);
-
-        if *unstable_opts {
-            p.arg("-Zunstable-options");
-        }
-
-        if gctx.extra_verbose() {
-            p.display_env_vars();
-        }
+        let p = doctest_process(ws, compilation, doctest_info, test_args)?;
 
         gctx.shell()
             .verbose(|shell| shell.status("Running", p.to_string()))?;
@@ -358,6 +291,180 @@ fn display_no_run_information(
     }
 
     return Ok(());
+}
+
+/// Creates the `rustdoc --test` [`ProcessBuilder`] that runs one unit's doctests.
+fn doctest_process(
+    ws: &Workspace<'_>,
+    compilation: &Compilation<'_>,
+    doctest_info: &Doctest,
+    test_args: &[&str],
+) -> CargoResult<ProcessBuilder> {
+    let Doctest {
+        args,
+        unstable_opts,
+        unit,
+        linker,
+        script_metas,
+        env,
+    } = doctest_info;
+    let gctx = ws.gctx();
+
+    let mut p = compilation.rustdoc_process(unit, script_metas.as_ref())?;
+
+    for (var, value) in env {
+        p.env(var, value);
+    }
+
+    let color_arg = match gctx.shell().color_choice() {
+        ColorChoice::Always => "always",
+        ColorChoice::Never => "never",
+        ColorChoice::CargoAuto => "auto",
+    };
+    p.arg("--color").arg(color_arg);
+
+    p.arg("--crate-name").arg(&unit.target.crate_name());
+    p.arg("--test");
+
+    add_path_args(ws, unit, &mut p);
+    p.arg("--test-run-directory").arg(unit.pkg.root());
+
+    unit.kind.add_target_arg(&mut p);
+
+    if let Some((runtool, runtool_args)) = compilation.target_runner(unit.kind) {
+        p.arg("--test-runtool").arg(runtool);
+        for arg in runtool_args {
+            p.arg("--test-runtool-arg").arg(arg);
+        }
+    }
+    if let Some(linker) = linker {
+        let mut joined = OsString::from("linker=");
+        joined.push(linker);
+        p.arg("-C").arg(joined);
+    }
+
+    if unit.profile.panic != PanicStrategy::Unwind {
+        p.arg("-C").arg(format!("panic={}", unit.profile.panic));
+    }
+
+    for native_dep in compilation.native_dirs.iter() {
+        p.arg("-L").arg(native_dep);
+    }
+
+    for arg in test_args {
+        p.arg("--test-args").arg(arg);
+    }
+
+    if gctx.shell().verbosity() == Verbosity::Quiet {
+        p.arg("--test-args").arg("--quiet");
+    }
+
+    p.args(unit.pkg.manifest().lint_rustflags());
+
+    p.args(args);
+
+    if *unstable_opts {
+        p.arg("-Zunstable-options");
+    }
+
+    if gctx.extra_verbose() {
+        p.display_env_vars();
+    }
+
+    Ok(p)
+}
+
+/// A test that is built and ready to run.
+///
+/// Returned by [`prepare_compiled_tests`], for callers that run the tests
+/// themselves instead of letting [`run_compiled_tests`] do it. `cargo-batch`
+/// does, so that it can run the tests of a whole batch in parallel.
+pub struct PreparedTest {
+    unit: Unit,
+    kind: TestKind,
+    /// What is being run: `unittests src/lib.rs (target/debug/deps/foo-1234)`
+    /// for a test binary, the crate name for a doctest.
+    pub description: String,
+    /// The process that runs it.
+    pub cmd: ProcessBuilder,
+}
+
+impl PreparedTest {
+    /// Whether this is a doctest run through `rustdoc --test`.
+    pub fn is_doctest(&self) -> bool {
+        matches!(self.kind, TestKind::Doctest)
+    }
+
+    /// Whether the test binary uses the libtest harness.
+    pub fn is_harness(&self) -> bool {
+        self.unit.target.harness()
+    }
+
+    /// The CLI args that select this target on its own, for a "to rerun pass
+    /// `...`" message.
+    pub fn rerun_args(&self, ws: &Workspace<'_>, opts: &ops::CompileOptions) -> String {
+        UnitTestError {
+            unit: self.unit.clone(),
+            kind: self.kind,
+        }
+        .cli_args(ws, opts)
+    }
+}
+
+/// Builds the processes that run the tests of an already-compiled build.
+///
+/// `filter` picks the units to run out of `compilation`, the same way
+/// [`run_compiled_tests`] does. Test binaries come first, then doctests.
+pub fn prepare_compiled_tests(
+    ws: &Workspace<'_>,
+    test_args: &[&str],
+    compilation: &Compilation<'_>,
+    filter: &dyn Fn(&Unit) -> bool,
+) -> CargoResult<Vec<PreparedTest>> {
+    let gctx = ws.gctx();
+    let cwd = gctx.cwd();
+    let mut tests = Vec::new();
+
+    for UnitOutput {
+        unit,
+        path,
+        script_metas,
+        env,
+    } in compilation.tests.iter().filter(|t| filter(&t.unit))
+    {
+        let (description, cmd) = cmd_builds(
+            gctx,
+            cwd,
+            unit,
+            path,
+            script_metas.as_ref(),
+            env,
+            test_args,
+            compilation,
+            "unittests",
+        )?;
+        tests.push(PreparedTest {
+            unit: unit.clone(),
+            kind: TestKind::Test,
+            description,
+            cmd,
+        });
+    }
+
+    for doctest_info in compilation
+        .to_doc_test
+        .iter()
+        .filter(|d| filter(&d.unit))
+    {
+        tests.push(PreparedTest {
+            unit: doctest_info.unit.clone(),
+            kind: TestKind::Doctest,
+            description: doctest_info.unit.target.name().to_string(),
+            cmd: doctest_process(ws, compilation, doctest_info, test_args)?,
+        });
+    }
+
+    Ok(tests)
 }
 
 /// Creates a [`ProcessBuilder`] for executing a single test.

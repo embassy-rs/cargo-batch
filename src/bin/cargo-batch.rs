@@ -7,12 +7,19 @@ use cargo::core::compiler::{
     unit_graph, BuildContext, BuildRunner, DefaultExecutor, Executor, Unit, UnitIndex, UnitInterner,
 };
 use cargo::core::Workspace;
-use cargo_util_terminal::Shell;
+use cargo_util_terminal::{ColorChoice, Shell};
 use cargo::ops::{CompileOptions, OutputFormat};
 use cargo::util::network::http::{http_handle, needs_custom_http_transport};
 use cargo::util::{command_prelude, CliResult, GlobalContext};
+use cargo::ops::PreparedTest;
+use cargo::util::CliError;
+use cargo_util::{ProcessBuilder, ProcessError};
 use std::collections::HashSet;
+use std::io::{IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
 use std::{env, io};
 
 use crate::command_prelude::*;
@@ -34,6 +41,29 @@ fn main() {
         Err(e) => cargo::exit_with_error(e, &mut *config.shell()),
         Ok(()) => {}
     }
+}
+
+/// What a `test` command wants done once its units are built.
+struct TestState {
+    no_run: bool,
+    no_fail_fast: bool,
+    args: Vec<String>,
+    /// The batch invocation this came from, as a runnable command line. This is
+    /// what a failing test is attributed to: a batch runs hundreds of commands,
+    /// and the test binary's path alone doesn't say which one built it.
+    invocation: String,
+    /// Root units of this command, filled in when its build context is created.
+    /// Everything is compiled as one merged build, so this is what tells the
+    /// tests of this command apart from everyone else's.
+    roots: Vec<Unit>,
+}
+
+struct CommandState {
+    /// Index into `workspaces`.
+    ws: usize,
+    compile_opts: CompileOptions,
+    /// `Some` if this is a `test` command.
+    test: Option<TestState>,
 }
 
 fn main2(gctx: &mut GlobalContext) -> CliResult {
@@ -94,25 +124,6 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
 
     let unit_graph = global_args.flag("unit-graph");
 
-    /// What a `test` command wants done once its units are built.
-    struct TestState {
-        no_run: bool,
-        no_fail_fast: bool,
-        args: Vec<String>,
-        /// Root units of this command, filled in when its build context is
-        /// created. Everything is compiled as one merged build, so this is what
-        /// tells the tests of this command apart from everyone else's.
-        roots: Vec<Unit>,
-    }
-
-    struct CommandState {
-        /// Index into `workspaces`.
-        ws: usize,
-        compile_opts: CompileOptions,
-        /// `Some` if this is a `test` command.
-        test: Option<TestState>,
-    }
-
     // Loading a workspace parses its manifest and every member's manifest, which
     // is expensive in both time and memory. A batch typically contains many
     // commands for the same manifest (one per feature combination), so load each
@@ -136,6 +147,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
 
     let mut cmds = Vec::new();
     for args in subargs {
+        let invocation = format!("cargo {}", shell_words::join(args.iter().map(|s| s.as_str())));
         let cli = build_cli();
         let args = cli.try_get_matches_from([String::new()].into_iter().chain(args.into_iter()))?;
         let (subcmd, args) = args.subcommand().unwrap();
@@ -220,6 +232,7 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
                         no_run,
                         no_fail_fast: args.flag("no-fail-fast"),
                         args: test_args,
+                        invocation,
                         roots: Vec::new(),
                     }),
                 });
@@ -364,26 +377,250 @@ fn main2(gctx: &mut GlobalContext) -> CliResult {
     let exec: Arc<dyn Executor> = Arc::new(DefaultExecutor);
     let compilation = cx.compile(&exec)?;
 
-    // Everything is built now. Run the tests of each `test` command, in the
-    // order the commands were given, over the units that command asked for.
-    for cmd in &cmds {
+    // Everything is built now. Collect the tests of every `test` command and run
+    // them, in parallel with each other.
+    let mut jobs: Vec<TestJob> = Vec::new();
+    for (idx, cmd) in cmds.iter().enumerate() {
         let Some(test) = &cmd.test else { continue };
 
+        let ws = &workspaces[cmd.ws];
         let roots: HashSet<&Unit> = test.roots.iter().collect();
         let test_args: Vec<&str> = test.args.iter().map(String::as_str).collect();
 
-        cargo::ops::run_compiled_tests(
-            &workspaces[cmd.ws],
-            &cmd.compile_opts,
-            test.no_run,
-            test.no_fail_fast,
-            &test_args,
-            &compilation,
-            &|unit| roots.contains(unit),
-        )?;
+        if test.no_run {
+            // Nothing to run, but `--no-run` still lists the executables.
+            cargo::ops::run_compiled_tests(
+                ws,
+                &cmd.compile_opts,
+                true,
+                test.no_fail_fast,
+                &test_args,
+                &compilation,
+                &|unit| roots.contains(unit),
+            )?;
+            continue;
+        }
+
+        for prepared in
+            cargo::ops::prepare_compiled_tests(ws, &test_args, &compilation, &|unit| {
+                roots.contains(unit)
+            })?
+        {
+            jobs.push(TestJob { cmd: idx, prepared });
+        }
     }
 
-    Ok(())
+    let concurrency = cmds
+        .iter()
+        .filter_map(|cmd| cmd.test.as_ref().map(|_| cmd.compile_opts.build_config.jobs))
+        .max()
+        .unwrap_or(1)
+        .max(1) as usize;
+
+    run_tests_parallel(gctx, &workspaces, &cmds, &jobs, concurrency)
+}
+
+/// One test binary (or doctest invocation) to run, and the command it came from.
+struct TestJob {
+    /// Index into `cmds`.
+    cmd: usize,
+    prepared: PreparedTest,
+}
+
+/// Runs test binaries concurrently, up to `concurrency` at a time.
+///
+/// Cargo runs one test binary at a time; a batch has hundreds of them, and each
+/// one is mostly process startup, so running them one by one dominates the wall
+/// clock once everything is compiled.
+///
+/// Output is captured and printed as one block per test when it finishes, so
+/// the blocks don't interleave. Every block, and every failure, names the batch
+/// invocation it belongs to.
+fn run_tests_parallel(
+    gctx: &GlobalContext,
+    workspaces: &[Workspace<'_>],
+    cmds: &[CommandState],
+    jobs: &[TestJob],
+    concurrency: usize,
+) -> CliResult {
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    // Each test binary sizes its own libtest thread pool to the whole machine, so
+    // running N of them at once asks for N*ncpu threads and spends more time in
+    // the scheduler than in the tests. Divide the budget instead: with more
+    // binaries in flight than cores this is one thread each, and with a single
+    // binary in flight nothing is set and libtest keeps the whole machine.
+    let in_flight = concurrency.min(jobs.len());
+    let test_threads = (concurrency / in_flight).max(1);
+    let harness_threads_set = env::var_os("RUST_TEST_THREADS").is_some();
+
+    // The output is captured, so the harness sees a pipe and turns color off.
+    // Ask for it back when the terminal cargo is writing to has it.
+    let color = match gctx.shell().color_choice() {
+        ColorChoice::Always => Some("always"),
+        ColorChoice::CargoAuto if io::stdout().is_terminal() => Some("always"),
+        _ => None,
+    };
+
+    // Only the processes cross the thread boundary: a `PreparedTest` holds a
+    // `Unit`, which is `Rc`-backed and not `Send`.
+    let procs: Vec<ProcessBuilder> = jobs
+        .iter()
+        .map(|job| {
+            let mut proc = job.prepared.cmd.clone();
+            let args = &cmds[job.cmd].test.as_ref().unwrap().args;
+            let asked_for_threads = args
+                .iter()
+                .any(|a| a == "--test-threads" || a.starts_with("--test-threads="));
+            if in_flight > 1 && !harness_threads_set && !asked_for_threads {
+                proc.env("RUST_TEST_THREADS", test_threads.to_string());
+            }
+            // Only libtest binaries take these; a `harness = false` target gets
+            // whatever args the user passed and nothing else. Doctests get their
+            // color choice from cargo already.
+            if let Some(color) = color {
+                let asked_for_color = args.iter().any(|a| a == "--color" || a.starts_with("--color="));
+                if job.prepared.is_harness() && !job.prepared.is_doctest() && !asked_for_color {
+                    proc.arg("--color").arg(color);
+                }
+            }
+            proc
+        })
+        .collect();
+    gctx.shell().verbose(|shell| {
+        shell.status(
+            "Testing",
+            format!(
+                "{} targets, {in_flight} at a time, {test_threads} harness thread(s) each",
+                jobs.len()
+            ),
+        )
+    })?;
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel();
+
+    let mut failed: Vec<(usize, Option<i32>)> = Vec::new();
+    let mut ran = 0usize;
+
+    thread::scope(|scope| -> CliResult {
+        for _ in 0..concurrency.min(procs.len()) {
+            let tx = tx.clone();
+            let (next, stop, procs) = (&next, &stop, &procs);
+            scope.spawn(move || {
+                loop {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(proc) = procs.get(i) else { break };
+                    if tx.send((i, proc.exec_with_output())).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        for (i, result) in rx {
+            ran += 1;
+            let job = &jobs[i];
+            let test = &job.prepared;
+            let cmd = &cmds[job.cmd];
+            let state = cmd.test.as_ref().unwrap();
+
+            let status = if test.is_doctest() {
+                "Doc-tests"
+            } else {
+                "Running"
+            };
+            gctx.shell().status(status, &test.description)?;
+            gctx.shell().status("from", &state.invocation)?;
+
+            let (out, err, code) = match &result {
+                Ok(out) => (Some(&out.stdout), Some(&out.stderr), None),
+                Err(e) => match e.downcast_ref::<ProcessError>() {
+                    Some(pe) => (pe.stdout.as_ref(), pe.stderr.as_ref(), Some(pe.code)),
+                    None => (None, None, Some(None)),
+                },
+            };
+            print_captured(out, err);
+
+            if let Some(code) = code {
+                if let Err(e) = &result {
+                    if e.downcast_ref::<ProcessError>().is_none() {
+                        // The process didn't even launch.
+                        cargo::display_error(e, &mut gctx.shell());
+                    }
+                }
+                gctx.shell().error(format!(
+                    "test failed: {}\n    in: {}\n    to rerun this target alone, add `{}`",
+                    test.description,
+                    state.invocation,
+                    test.rerun_args(&workspaces[cmd.ws], &cmd.compile_opts),
+                ))?;
+                failed.push((i, code));
+                if !state.no_fail_fast {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    if failed.is_empty() {
+        return Ok(());
+    }
+
+    if failed.len() > 1 {
+        let list: Vec<String> = failed
+            .iter()
+            .map(|(i, _)| {
+                let job = &jobs[*i];
+                let state = cmds[job.cmd].test.as_ref().unwrap();
+                format!(
+                    "    {}\n        in {}",
+                    job.prepared.description, state.invocation
+                )
+            })
+            .collect();
+        gctx.shell().error(format!(
+            "{} test targets failed:\n{}",
+            failed.len(),
+            list.join("\n")
+        ))?;
+    }
+    if ran < jobs.len() {
+        gctx.shell().note(format!(
+            "{} test targets were not run, because a test failed. Pass --no-fail-fast to run them all.",
+            jobs.len() - ran
+        ))?;
+    }
+
+    // With one failure, report its own exit code, like cargo does. With several
+    // there is no single code to report, so use cargo's generic test failure one.
+    let code = match failed.as_slice() {
+        [(_, Some(code))] => *code,
+        _ => 101,
+    };
+    Err(CliError::code(code))
+}
+
+/// Writes a finished test's captured output, keeping stdout and stderr on the
+/// streams they came from.
+fn print_captured(stdout: Option<&Vec<u8>>, stderr: Option<&Vec<u8>>) {
+    let mut out = io::stdout();
+    let mut err = io::stderr();
+    if let Some(bytes) = stdout {
+        drop(out.write_all(bytes));
+    }
+    drop(out.flush());
+    if let Some(bytes) = stderr {
+        drop(err.write_all(bytes));
+    }
+    drop(err.flush());
 }
 
 fn config_configure(config: &mut GlobalContext, args: &ArgMatches) -> CliResult {
